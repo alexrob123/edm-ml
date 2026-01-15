@@ -12,7 +12,7 @@ def download_aligned_jpg(dir):
 
     # Prepare folder
     base_dir = Path(dir).expanduser()
-    out_dir = base_dir / "CelebA" / "AlignedCropped" / "JPG"
+    out_dir = base_dir / "CelebA" / "AlignedCropped-JPG"
     out_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"\tPreparing folder {out_dir}")
 
@@ -34,7 +34,7 @@ def download_aligned_png(dir):
 
     # Prepare folder
     base_dir = Path(dir).expanduser()
-    out_dir = base_dir / "CelebA" / "AlignedCropped" / "PNG"
+    out_dir = base_dir / "CelebA" / "AlignedCropped-PNG"
     out_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"\tPreparing folder {out_dir}")
 

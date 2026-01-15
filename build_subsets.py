@@ -55,7 +55,7 @@ if __name__ == "__main__":
         "--data-dir",
         "-d",
         type=str,
-        default="~/data/CelebA/AlignedCropped/JPG",
+        default="~/data/CelebA/AlignedCropped-JPG",
         help="Directory for reading data.",
     )
     parser.add_argument(
@@ -74,7 +74,7 @@ if __name__ == "__main__":
         "--out-dir",
         "-o",
         type=str,
-        default="_NonOverlappingClasses",
+        default="_powerset_partitions",
         help="Name of directory for storing subset data folders inside data directory",
     )
     parser.add_argument(
