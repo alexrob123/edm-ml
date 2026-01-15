@@ -3,13 +3,7 @@ import itertools
 import logging
 from pathlib import Path
 
-from edm_ml.data_manager import (
-    build_metadata,
-    create_subset,
-    load_counts,
-    load_imgs,
-    read_attr,
-)
+from edm_ml.data_manager import build_subset, read_attr
 from edm_ml.monitor import set_logging
 
 logger = logging.getLogger(__name__)
@@ -17,33 +11,32 @@ logger = logging.getLogger(__name__)
 
 def main(args):
     data_dir = Path(args.data_dir).expanduser()
-    logger.info(f"Reading data from {data_dir}")
-
     img_dir = data_dir / args.img_dir
     att_file = data_dir / args.attr_file
+    logger.info(f"Reading from {data_dir}")
     logger.info(f"\timg from: {img_dir}")
     logger.info(f"\tatt from: {att_file}")
 
     out_dir = data_dir / args.out_dir
-    counts_file = out_dir / "subset_counts.txt"
-    imgs_file = out_dir / "subset_imgs.txt"
-    logger.info(f"Writing subset folder in {out_dir}")
-    logger.info(f"\tcont metadata in {counts_file}")
-    logger.info(f"\timgs metadata in {imgs_file}")
+    logger.info(f"Writing to {out_dir}")
 
     # Read attributes
     attr_names, attr_imgs, attr_data = read_attr(att_file)
     sel_attrs = args.attrs
-    logger.info(f"Avail. attributes: {attr_names}")
-    logger.info(f"Selec. attributes: {sel_attrs} ")
+    logger.info(f"Avail. attributes: \n{attr_names}\n")
+    logger.info(f"Selec. attributes: \n{sel_attrs}\n")
+    for a in sel_attrs:
+        if a not in attr_names:
+            raise ValueError(f"Unexpected attribute: {a}")
 
     # Build subset folders
     logger.info(f"Creating subsets of {img_dir} \n\t in {out_dir}")
-    for k in range(1, len(args.attrs) + 1):
+    for k in range(0, len(args.attrs) + 1):
         for c in itertools.combinations(range(len(args.attrs)), k):
             comb_attrs = [sel_attrs[i] for i in c]
 
-            folder, images = create_subset(
+            build_subset(
+                sel_attrs,
                 comb_attrs,
                 attr_names,
                 attr_imgs,
@@ -51,18 +44,6 @@ def main(args):
                 img_dir=img_dir,
                 out_dir=out_dir,
             )
-
-            if images is None:  # subset already exists
-                continue
-
-    # Build, write and read metadata
-    build_metadata(out_dir)
-    counts = load_counts(out_dir, counts_file)
-    imgs = load_imgs(out_dir, imgs_file)
-
-    for k1, k2 in zip(counts.keys(), imgs.keys()):
-        assert k1 == k2
-        assert counts[k1] == len(imgs[k2])
 
 
 if __name__ == "__main__":
@@ -74,7 +55,7 @@ if __name__ == "__main__":
         "--data-dir",
         "-d",
         type=str,
-        default="~/data/CelebA64",
+        default="~/data/CelebA/AlignedCropped/JPG",
         help="Directory for reading data.",
     )
     parser.add_argument(
@@ -93,7 +74,7 @@ if __name__ == "__main__":
         "--out-dir",
         "-o",
         type=str,
-        default="_combinations",
+        default="_NonOverlappingClasses",
         help="Name of directory for storing subset data folders inside data directory",
     )
     parser.add_argument(

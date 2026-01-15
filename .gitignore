@@ -1,6 +1,7 @@
 # Dev files
 /notebooks*
 /output/*
+*.log
 
 # Python-generated files
 __pycache__/
