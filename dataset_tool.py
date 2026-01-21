@@ -5,6 +5,8 @@
 # You should have received a copy of the license along with this
 # work. If not, see http://creativecommons.org/licenses/by-nc-sa/4.0/
 
+# https://github.com/NVlabs/edm/blob/main/dataset_tool.py
+
 """Tool for creating ZIP/PNG based datasets."""
 
 import functools

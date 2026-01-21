@@ -1,10 +1,11 @@
-# Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
-# distribution of this software and related documentation without an express
-# license agreement from NVIDIA CORPORATION is strictly prohibited.
+# This work is licensed under a Creative Commons
+# Attribution-NonCommercial-ShareAlike 4.0 International License.
+# You should have received a copy of the license along with this
+# work. If not, see http://creativecommons.org/licenses/by-nc-sa/4.0/
+
+# https://github.com/NVlabs/edm/blob/main/training/dataset.py
 
 """Streaming images and labels from datasets created with dataset_tool.py."""
 
@@ -12,10 +13,11 @@ import json
 import os
 import zipfile
 
-import dnnlib
 import numpy as np
 import PIL.Image
 import torch
+
+import dnnlib
 
 try:
     import pyspng
@@ -23,6 +25,7 @@ except ImportError:
     pyspng = None
 
 # ----------------------------------------------------------------------------
+# Abstract base class for datasets.
 
 
 class Dataset(torch.utils.data.Dataset):
@@ -34,17 +37,20 @@ class Dataset(torch.utils.data.Dataset):
         use_labels=False,  # Enable conditioning labels? False = label dimension is zero.
         xflip=False,  # Artificially double the size of the dataset via x-flips. Applied after max_size.
         random_seed=0,  # Random seed to use when applying max_size.
+        cache=False,  # Cache images in CPU memory?
     ):
         self._name = name
         self._raw_shape = list(raw_shape)
         self._use_labels = use_labels
+        self._cache = cache
+        self._cached_images = dict()  # {raw_idx: np.ndarray, ...}
         self._raw_labels = None
         self._label_shape = None
 
         # Apply max_size.
         self._raw_idx = np.arange(self._raw_shape[0], dtype=np.int64)
         if (max_size is not None) and (self._raw_idx.size > max_size):
-            np.random.RandomState(random_seed).shuffle(self._raw_idx)
+            np.random.RandomState(random_seed % (1 << 31)).shuffle(self._raw_idx)
             self._raw_idx = np.sort(self._raw_idx[:max_size])
 
         # Apply xflip.
@@ -88,7 +94,12 @@ class Dataset(torch.utils.data.Dataset):
         return self._raw_idx.size
 
     def __getitem__(self, idx):
-        image = self._load_raw_image(self._raw_idx[idx])
+        raw_idx = self._raw_idx[idx]
+        image = self._cached_images.get(raw_idx, None)
+        if image is None:
+            image = self._load_raw_image(raw_idx)
+            if self._cache:
+                self._cached_images[raw_idx] = image
         assert isinstance(image, np.ndarray)
         assert list(image.shape) == self.image_shape
         assert image.dtype == np.uint8
@@ -156,6 +167,8 @@ class Dataset(torch.utils.data.Dataset):
 
 
 # ----------------------------------------------------------------------------
+# Dataset subclass that loads images recursively from the specified directory
+# or ZIP file.
 
 
 class ImageFolderDataset(Dataset):
@@ -163,9 +176,11 @@ class ImageFolderDataset(Dataset):
         self,
         path,  # Path to directory or zip.
         resolution=None,  # Ensure specific resolution, None = highest available.
+        use_pyspng=True,  # Use pyspng if available?
         **super_kwargs,  # Additional arguments for the Dataset base class.
     ):
         self._path = path
+        self._use_pyspng = use_pyspng
         self._zipfile = None
 
         if os.path.isdir(self._path):
@@ -228,7 +243,11 @@ class ImageFolderDataset(Dataset):
     def _load_raw_image(self, raw_idx):
         fname = self._image_fnames[raw_idx]
         with self._open_file(fname) as f:
-            if pyspng is not None and self._file_ext(fname) == ".png":
+            if (
+                self._use_pyspng
+                and pyspng is not None
+                and self._file_ext(fname) == ".png"
+            ):
                 image = pyspng.load(f.read())
             else:
                 image = np.array(PIL.Image.open(f))

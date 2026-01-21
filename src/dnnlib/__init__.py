@@ -6,6 +6,6 @@
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 
-"""This module is a copy of https://github.com/NVlabs/stylegan3/tree/main/dnnlib"""
+# https://github.com/NVlabs/edm/blob/main/dnnlib/__init__.py
 
 from .util import EasyDict, make_cache_dir_path
