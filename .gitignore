@@ -1,4 +1,5 @@
 # Dev files
+/ckpts*
 /notebooks*
 /output/*
 *.log

@@ -5,68 +5,90 @@ This illustrative example is run with CelebA dataset and a selection of availabl
 
 ## Dataset
 
-At the moment the project revolves around [CelebA aligned and cropped dataset](http://mmlab.ie.cuhk.edu.hk/projects/CelebA.html). Other datasets might be added later.
+At the moment the project revolves around [CelebA dataset](https://arxiv.org/abs/1411.7766). Other datasets might be added later.
 
-For automatic download, you can update and run:
+For automatic download, run:
+
+[//]: # "FIX: UPDATE THIS, remove ALIgned"
 
 ```bash
 uv run download.py --dir ~/data --aligned 1 --extension jpg
-cd ~/data/CelebA/AlignedCropped-JPG
+cd ~/data/CelebA
 unzip img_align_celeba.zip
 ```
 
-- Create dir `~/data/CelebA/AlignedCropped-JPG`
-- Download `img_align_celeba.zip` and `list_attr_celeba.txt`
-- Unzip `img_align_celeba.zip`
+or [download dataset](http://mmlab.ie.cuhk.edu.hk/projects/CelebA.html) by hand.
 
-Or download dataset by hand [here](http://mmlab.ie.cuhk.edu.hk/projects/CelebA.html).
+## Multi-Label Classification with Label Powerset
 
-## Powerset partitions
-
-For a given attributes selection, the original dataset is split in non-overlapping subsets per attribute combination (labelsets in the powerset of the selection, cf multi-label learning) and stored in corresponding folder. Each folder contains the images corresponding the attribute combination.
-
-Dataset is build to the be compatible with [EDM](https://github.com/NVlabs/edm) project, that is in the [StyleGAN](https://github.com/NVlabs/stylegan3) format.
-
-Subdata folders per labelset in the selected attributes powerset can be generated with default:
+For a given selection of labels among all available lables, defining a label space $\mathcal{L}$, the original dataset is split into non-overlapping classes, or label combinations, corresponding to the labelsets in the powerset of $\mathcal{L}$. Each subset is stored in a separate folder containing all images corresponding to that specific Labelset.
 
 ```bash
 uv run build_subsets.py \
-    --data-dir ~/data/CelebA/AlignedCropped-JPG \
+    --data-dir ~/data/CelebA \
     --img-dir img_align_celeba \
     --attr-file list_attr_celeba.txt \
-    --out-dir _powerset_partitions \
+    --out-dir powerset_partitions \
     --attrs Bangs Eyeglasses Male Smiling
 ```
 
 With default parameters, data directory should look like:
 
 ```
-~/data/CelebA/AlignedCropped-JPG
-├── \_powerset_partitions
-├── img_align_celeba
+~/data/CelebA
+├── list_attr_celeba.txt
 ├── img_align_celeba.zip
-└── list_attr_celeba.txt
+├── img_align_celeba
+└── powerset_partitions
 ```
 
 ```
-~/data/CelebA/AlignedCropped-JPG/_powerset_partitions
-    ├── selection_hash
-    │   ├── combination_1_hash
+~/data/CelebA/powerset_partitions
+    ├── labelspace_hash
+    │   ├── labelset_1_hash
     │   │   ├── 000003.jpg
     │   │   └── 000007.jpg
-    │   ├── combination_2_hash
+    │   ├── labelset_2_hash
     │   │   ├── 000001.jpg
     │   │   └── 000002.jpg
     │   ├── ...
     │   └── metadata.json
 ```
 
-Newly created `_powerset_partitions/selection_hash` directory can then be fed to the [EDM](https://github.com/NVlabs/edm) `dataset_tool.py` added to the project. For more information on the tool, see dedicated section [Preparing dataset](https://github.com/NVlabs/edm/blob/main/docs/dataset-tool-help.txt) and [`python dataset_tool.py --help`](https://github.com/NVlabs/edm/blob/main/docs/dataset-tool-help.txt).
+The dataset structure is built to be compatible with [EDM project](https://github.com/NVlabs/edm) and can be ingested directly using `dataset_tool.py`. More information on the tool in [`python dataset_tool.py --help`](https://github.com/NVlabs/edm/blob/main/docs/dataset-tool-help.txt).
 
 ```bash
 uv run dataset_tool.py \
-    --source ~/data/CelebA/AlignedCropped-JPG/_powerset_partitions/<selection_hash> \
-    --dest  ~/data/CelebA/edm-64x64/<selection_hash>.zip \
+    --source ~/data/CelebA/powerset_partitions/<labelspace_hash> \
+    --dest  ~/data/CelebA/edm-64x64/<labelspace_hash>.zip \
     --transform center-crop \
     --resolution 64x64
+```
+
+Alternatively (and equivalently) run:
+
+```bash
+git clone git@github.com:NVlabs/edm.git
+cd edm
+conda env create -f environment.yml -n edm
+conda activate edm
+python dataset_tool.py \
+    --source ~/data/CelebA/powerset_partitions/<labelspace_hash> \
+    --dest  ~/data/CelebA/edm-64x64/<labelspace_hash>.zip \
+    --transform center-crop \
+    --resolution 64x64
+```
+
+## Calculating FID
+
+The Fréchet Inception Distance reference statistics for the dataset is computed with [EDM project](https://github.com/NVlabs/edm):
+
+[//]: # "FIX: UPDATE THIS, do we add the file or let it in other project ?"
+
+```bash
+git clone git@github.com:NVlabs/edm.git
+cd edm
+conda env create -f environment.yml -n edm
+conda activate edm
+python fid.py ref --data datasets/my-dataset.zip --dest fid-refs/my-dataset.npz
 ```
