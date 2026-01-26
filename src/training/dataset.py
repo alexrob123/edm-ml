@@ -260,15 +260,42 @@ class ImageFolderDataset(Dataset):
         fname = "dataset.json"
         if fname not in self._all_fnames:
             return None
+
         with self._open_file(fname) as f:
-            labels = json.load(f)["labels"]
-        if labels is None:
+            data = json.load(f)
+
+        raw = data.get("labels", None)
+        if raw is None:
             return None
-        labels = dict(labels)
+
+        labels = {k.replace("\\", "/"): v for k, v in raw}
         labels = [labels[fname.replace("\\", "/")] for fname in self._image_fnames]
-        labels = np.array(labels)
-        labels = labels.astype({1: np.int64, 2: np.float32}[labels.ndim])
-        return labels
+
+        # Multi-Label.
+        if all(isinstance(x, list) for x in labels):
+            # Infer number of labels.
+            max_value = max((x for sub in labels for x in sub), default=-1)
+            num_labels = max_value + 1
+            assert num_labels > 0
+
+            # Multi-hot encoding.
+            multi_hot = np.zeros((len(labels), num_labels), dtype=np.float32)
+            for i, lab_ids in enumerate(labels):
+                if lab_ids:
+                    multi_hot[i, lab_ids] = 1.0
+
+            return multi_hot
+
+        # Mixed format -> error.
+        elif any(isinstance(x, list) for x in labels):
+            raise ValueError("All labels in metadata should have same format")
+
+        # Single-Label.
+        else:
+            labels = np.array(labels)
+            labels = labels.astype({1: np.int64, 2: np.float32}[labels.ndim])
+
+            return labels
 
 
 # ----------------------------------------------------------------------------
