@@ -1,6 +1,7 @@
 # Dev files
 /ckpts*
 /notebooks*
+/scripts*
 /output/*
 *.log
 

@@ -45,10 +45,10 @@ With default parameters, data directory should look like:
 ```
 ~/data/CelebA/powerset_partitions
     ├── labelspace_hash
-    │   ├── labelset_1_hash
+    │   ├── labelset1_hash
     │   │   ├── 000003.jpg
     │   │   └── 000007.jpg
-    │   ├── labelset_2_hash
+    │   ├── labelset2_hash
     │   │   ├── 000001.jpg
     │   │   └── 000002.jpg
     │   ├── ...
