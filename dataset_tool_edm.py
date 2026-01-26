@@ -13,7 +13,6 @@ import functools
 import gzip
 import io
 import json
-import logging
 import os
 import pickle
 import re
@@ -27,14 +26,6 @@ import click
 import numpy as np
 import PIL.Image
 from tqdm import tqdm
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(levelname)s] %(name)s: %(message)s",
-    force=True,
-)
-
-logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------------
 # Parse a 'M,N' or 'MxN' integer tuple.
@@ -76,8 +67,6 @@ def is_image_ext(fname: Union[str, Path]) -> bool:
 
 
 def open_image_folder(source_dir, *, max_images: Optional[int]):
-    logger.info("Opening image folder...")
-
     input_images = [
         str(f)
         for f in sorted(Path(source_dir).rglob("*"))
@@ -96,12 +85,7 @@ def open_image_folder(source_dir, *, max_images: Optional[int]):
         with open(meta_fname, "r") as file:
             data = json.load(file)["labels"]
             if data is not None:
-                labels = {
-                    x[0]: [int(xi) for xi in x[1]]
-                    if isinstance(x[1], list)
-                    else int(x[1])
-                    for x in data
-                }
+                labels = {x[0]: x[1] for x in data}
 
     # No labels available => determine from top-level directory names.
     if len(labels) == 0:
@@ -133,8 +117,6 @@ def open_image_folder(source_dir, *, max_images: Optional[int]):
 
 
 def open_image_zip(source, *, max_images: Optional[int]):
-    logger.info("Opening image zip...")
-
     with zipfile.ZipFile(source, mode="r") as z:
         input_images = [str(f) for f in sorted(z.namelist()) if is_image_ext(f)]
         max_idx = maybe_min(len(input_images), max_images)
@@ -145,12 +127,7 @@ def open_image_zip(source, *, max_images: Optional[int]):
             with z.open("dataset.json", "r") as file:
                 data = json.load(file)["labels"]
                 if data is not None:
-                    labels = {
-                        x[0]: [int(xi) for xi in x[1]]
-                        if isinstance(x[1], list)
-                        else int(x[1])
-                        for x in data
-                    }
+                    labels = {x[0]: x[1] for x in data}
 
     def iterate_images():
         with zipfile.ZipFile(source, mode="r") as z:
@@ -550,16 +527,7 @@ def main(
             os.path.join(archive_root_dir, archive_fname), image_bits.getbuffer()
         )
         labels.append(
-            None
-            if image["label"] is None
-            else [
-                archive_fname,
-                (
-                    [int(x) for x in image["label"]]
-                    if isinstance(image["label"], (list, tuple, np.ndarray))
-                    else int(image["label"])
-                ),
-            ]
+            [archive_fname, image["label"]] if image["label"] is not None else None
         )
 
     metadata = {"labels": labels if all(x is not None for x in labels) else None}
