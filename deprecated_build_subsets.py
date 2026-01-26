@@ -3,7 +3,7 @@ import itertools
 import logging
 from pathlib import Path
 
-from edm_ml.data_manager import build_subset, read_attr
+from edm_ml.data_manager import build_subset, read_celeba_labels
 from edm_ml.monitor import set_logging
 
 logger = logging.getLogger(__name__)
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 def main(args):
     data_dir = Path(args.data_dir).expanduser()
     img_dir = data_dir / args.img_dir
-    att_file = data_dir / args.attr_file
+    att_file = data_dir / args.labels_fname
     logger.info(f"Reading from {data_dir}")
     logger.info(f"\timg from: {img_dir}")
     logger.info(f"\tatt from: {att_file}")
@@ -21,7 +21,7 @@ def main(args):
     logger.info(f"Writing to {out_dir}")
 
     # Read attributes
-    attr_names, attr_imgs, attr_data = read_attr(att_file)
+    attr_names, attr_imgs, attr_data = read_celeba_labels(att_file)
     sel_attrs = args.attrs
     logger.info(f"Avail. attributes: \n{attr_names}\n")
     logger.info(f"Selec. attributes: \n{sel_attrs}\n")
@@ -55,7 +55,7 @@ if __name__ == "__main__":
         "--data-dir",
         "-d",
         type=str,
-        default="~/data/CelebA/AlignedCropped-JPG",
+        default="~/data/CelebA/",
         help="Directory for reading data.",
     )
     parser.add_argument(
@@ -65,7 +65,7 @@ if __name__ == "__main__":
         help="Name of image directory inside data directory.",
     )
     parser.add_argument(
-        "--attr-file",
+        "--labels-fname",
         type=str,
         default="list_attr_celeba.txt",
         help="Name of attr file inside data directory.",
@@ -74,12 +74,12 @@ if __name__ == "__main__":
         "--out-dir",
         "-o",
         type=str,
-        default="_powerset_partitions",
+        default="powerset_partitions",
         help="Name of directory for storing subset data folders inside data directory",
     )
     parser.add_argument(
-        "--attrs",
-        "-a",
+        "--labels",
+        "-l",
         type=str,
         nargs="+",
         default=[

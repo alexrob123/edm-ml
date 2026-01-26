@@ -56,21 +56,23 @@ from tqdm import tqdm
 logger = logging.getLogger(__name__)
 
 
-def read_attr(path: Path):
+def read_celeba_labels(path: Path):
     path = Path(path).expanduser()
-    logger.info(f"Reading attributes from {path}")
+    logger.info(f"Reading labels from {path}")
 
-    with open(path) as csv_file:
-        data = list(csv.reader(csv_file, delimiter=" ", skipinitialspace=True))
+    with open(path) as csvf:
+        data = list(csv.reader(csvf, delimiter=" ", skipinitialspace=True))
 
-    headers = data[1]
+    label_names = data[1]
     data = data[1 + 1 :]
 
-    indices = [row[0] for row in data]
-    data = [row[1:] for row in data]
-    data_int = [list(map(int, i)) for i in data]
+    img_fnames = [row[0] for row in data]
+    img_fnames = ["img_align_celeba/" + img_fname for img_fname in img_fnames]
 
-    return headers, indices, torch.tensor(data_int)
+    labels = [row[1:] for row in data]
+    labels_int = [list(map(int, i)) for i in labels]
+
+    return label_names, img_fnames, torch.tensor(labels_int)
 
 
 ############
