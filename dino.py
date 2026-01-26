@@ -4,6 +4,7 @@
 # -------------
 # Change in the number of classes considered (2^nl for lp, nl for br
 # Change in the way the predictions is derived from loggits
+# FIX: change accuracy computation for br method
 
 import argparse
 import logging
@@ -15,15 +16,19 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoImageProcessor, AutoModelForImageClassification
 
-from edm_ml.monitor import set_logging
 from training import dataset
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(levelname)s] %(name)s: %(message)s",
+    force=True,
+)
 
 logger = logging.getLogger(__name__)
 
 
 def br_batch_processing(x, y):
     x = x.to(torch.float32) / 255.0
-    y = None  # FIX
     return x, y
 
 
@@ -33,9 +38,24 @@ def lp_batch_processing(x, y):
     return x, y
 
 
+def br_pred_processing(outputs):
+    preds = torch.sigmoid(outputs.logits) > 0.5
+    return preds
+
+
 def lp_pred_processing(outputs):
     _, preds = torch.max(outputs.logits, 1)
     return preds
+
+
+def br_accuracy_computation(true, pred):
+    correct_per_class = ((pred == true).float()).sum(dim=0)  # [C]
+    total_per_class = true.shape[0]
+    accuracy_per_class = correct_per_class / total_per_class
+
+
+def lp_accuracy_computation(true, pred):
+    pass
 
 
 def prepare_model(num_labels):
@@ -64,18 +84,25 @@ def prepare_model(num_labels):
     return processor, model
 
 
+# MAIN #
+
+
 def main(args):
     logger.info(f"{'EVALUATION' if args.evaluate else 'TRAINING'}")
 
     ### CONFIG ###
+    NAME = args.name
 
     data_dir = Path(args.data_dir).expanduser()
     data_file = args.dataset
     DATA_PATH = data_dir / data_file
 
-    dataset_name, dataset_ext = data_file.split(".")
+    dataset_name, _ = data_file.split(".")
 
-    ckpt_dir = Path.cwd() / "ckpts" / dataset_name
+    if NAME is None:
+        ckpt_dir = Path.cwd() / "ckpts" / dataset_name
+    else:
+        ckpt_dir = Path.cwd() / "ckpts" / NAME / dataset_name
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     ckpt_file = f"dino_finetuning_{args.method}.pth"
     CKPT_PATH = ckpt_dir / ckpt_file
@@ -95,21 +122,21 @@ def main(args):
         "br": args.num_labels,
         "lp": 2**args.num_labels,
     }
-    DATA_PROCESSING = {
-        "br": None,
-        "lp": None,
-    }
-    CRITERION = {
+    CRITERION = {  # reduction="mean" by default,
         "br": nn.BCEWithLogitsLoss(),
-        "lp": nn.CrossEntropyLoss(label_smoothing=0.1),  # reduction="mean" by default,
+        "lp": nn.CrossEntropyLoss(label_smoothing=0.1),
     }
     BATCH_PROCESSING = {
         "br": br_batch_processing,
         "lp": lp_batch_processing,
     }
     PRED_PROCESSING = {
-        "br": None,
+        "br": br_pred_processing,
         "lp": lp_pred_processing,
+    }
+    ACC_COMPUTATION = {
+        "br": None,
+        "lp": None,
     }
 
     SEED = args.seed
@@ -211,7 +238,7 @@ def main(args):
             train_batch_pbar = tqdm(
                 train_loader,
                 leave=False,
-                desc=f"Epoch {epoch + 1}/{NUM_EPOCHS}",
+                desc=f"Epoch {epoch}/{NUM_EPOCHS}",
             )
 
             train_loss = 0
@@ -288,7 +315,8 @@ def main(args):
                 },
                 EVAL_PATH,
             )
-            break  # do not run further epochs
+            # Do not run further epochs.
+            break
 
         elif monitor["val_loss"][-1] < best_eval:
             best_eval = monitor["val_loss"][-1]
@@ -308,6 +336,13 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Training with Dino")
     parser.add_argument(
+        "--name",
+        "-xp",
+        type=str,
+        default="",
+        help="name for the xp, will go on the ckpt name",
+    )
+    parser.add_argument(
         "--method",
         "-m",
         type=str,
@@ -319,7 +354,6 @@ if __name__ == "__main__":
         "--data-dir",
         "-dd",
         type=str,
-        default="./data",
         help="Data Directory.",
     )
     parser.add_argument(
@@ -364,7 +398,6 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    set_logging()
     main(args)
 
     # data_dir: ~/data/CelebA/AlignedCropped/_edm64
