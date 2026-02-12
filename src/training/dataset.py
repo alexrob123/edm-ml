@@ -61,15 +61,23 @@ class Dataset(torch.utils.data.Dataset):
 
     def _get_raw_labels(self):
         if self._raw_labels is None:
+            # labels have never beeen loaded, load them if use_label
             self._raw_labels = self._load_raw_labels() if self._use_labels else None
+
             if self._raw_labels is None:
+                # array has shape [N, 0] (hence is empty) instead of [N] to ensure that
+                # self._raw_labels.ndim == 2 even when there are no labels,
+                # which simplifies the logic in get_label()
                 self._raw_labels = np.zeros([self._raw_shape[0], 0], dtype=np.float32)
+
             assert isinstance(self._raw_labels, np.ndarray)
             assert self._raw_labels.shape[0] == self._raw_shape[0]
             assert self._raw_labels.dtype in [np.float32, np.int64]
+
             if self._raw_labels.dtype == np.int64:
                 assert self._raw_labels.ndim == 1
                 assert np.all(self._raw_labels >= 0)
+
         return self._raw_labels
 
     def close(self):  # to be overridden by subclass
@@ -146,10 +154,13 @@ class Dataset(torch.utils.data.Dataset):
     def label_shape(self):
         if self._label_shape is None:
             raw_labels = self._get_raw_labels()
+
             if raw_labels.dtype == np.int64:
+                # label shape is max label + 1
                 self._label_shape = [int(np.max(raw_labels)) + 1]
             else:
                 self._label_shape = raw_labels.shape[1:]
+
         return list(self._label_shape)
 
     @property
