@@ -1,5 +1,6 @@
 # Dev files
-/ckpts*
+/ckpts**
+/models
 /notebooks*
 /scripts*
 /output/*

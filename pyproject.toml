@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "click>=8.3.1",
     "gdown>=5.2.1",
+    "gudhi>=3.11.0",
     "imageio-ffmpeg>=0.6.0",
     "matplotlib>=3.10.8",
     "pandas>=2.3.3",
