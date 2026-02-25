@@ -1,9 +1,10 @@
-# Dev files
-/ckpts**
-/models
-/notebooks*
-/scripts*
-/output/*
+# Dev directories
+test*
+checkpoints/*
+models/*
+notebooks/*
+scripts/*
+outputs/*
 *.log
 
 # Python-generated files
