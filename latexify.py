@@ -4,12 +4,11 @@ import json
 import logging
 from collections import Counter
 from pathlib import Path
-from types import SimpleNamespace
 
 import click
 import pandas as pd
 
-from datatools.multilabel import read_br_dataset_meta, read_lp_dataset_meta
+from datatools.multilabel import read_lp_dataset_meta
 from datatools.utils import extract_dataset_name, zip_labels
 
 logging.basicConfig(
