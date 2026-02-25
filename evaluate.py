@@ -20,8 +20,8 @@ from training.dataset import ImageFolderDataset
 
 FLAG_INCEPTION_REF_PATH = "inception-ref"
 FLAG_DINO_REF_PATH = "dino-ref"
-INCEPTION_FILE = "inception_stats.npy"
-DINO_FILE = "dino_stats.npy"
+INCEPTION_STATS_FILE = "inception_stats.npy"
+DINO_STATS_FILE = "dino_stats.npy"
 
 
 ####################################################################################################
@@ -743,8 +743,10 @@ def main():
     # Evaluate 
     python evaluation.py eval \
         --img-path dataset/model/generated_images.zip \
-        --metrics fid toppr toppr_dino \
-        --inception-ref dataset/inception-ref/inception_ref.npz    
+        --metrics fid toppr toppr-dino \
+        --inception-ref dataset/inception-ref/inception_ref.npz \
+        --dino-ref dataset/dino-ref/dino_ref.npz \
+        --batch 128
     """
 
 
@@ -786,6 +788,8 @@ def inception_ref(data_path, dst_dir, batch_size):
     data_path = Path(data_path).expanduser()
     data_dir = data_path.parent
     dataset_name = data_path.name.split(".")[0]
+    if dataset_name == "dataset":
+        dataset_name = data_dir.name
 
     if dst_dir is None:
         dst_dir = data_dir / f"{dataset_name}-{FLAG_INCEPTION_REF_PATH}"
@@ -863,6 +867,8 @@ def dino_ref(data_path, dst_dir, batch_size):
     data_path = Path(data_path).expanduser()
     data_dir = data_path.parent
     dataset_name = data_path.name.split(".")[0]
+    if dataset_name == "dataset":
+        dataset_name = data_dir.name
 
     if dst_dir is None:
         dst_dir = data_dir / f"{dataset_name}-{FLAG_DINO_REF_PATH}"
@@ -961,7 +967,7 @@ def inception_stats(img_path, seed, batch_size, reset_inception):
     np.random.seed(seed)
 
     out_path = os.path.dirname(img_path)
-    inception_file = os.path.join(out_path, INCEPTION_FILE)
+    inception_file = os.path.join(out_path, INCEPTION_STATS_FILE)
 
     if os.path.exists(inception_file) and not reset_inception:
         dist.print0(f"Using cached Inception stats from {inception_file}")
@@ -1046,7 +1052,7 @@ def dino_stats(img_path, seed, batch_size, reset):
     np.random.seed(seed)
 
     out_path = os.path.dirname(img_path)
-    dino_file = os.path.join(out_path, DINO_FILE)
+    dino_file = os.path.join(out_path, DINO_STATS_FILE)
 
     if os.path.exists(dino_file) and not reset:
         dist.print0(f"Using cached DINO stats from {dino_file}")
@@ -1089,16 +1095,24 @@ def dino_stats(img_path, seed, batch_size, reset):
 @click.option(
     "--metrics",
     multiple=True,
-    default=("fid", "toppr"),
-    help="Metrics to compute (e.g. --metrics fid --metrics toppr)",
+    default=("fid", "toppr", "toppr-dino"),
+    help="Metrics to compute (e.g. --metrics fid --metrics toppr --metrics toppr-dino)",
 )
 @click.option(
     "--inception-ref",
-    "inception_ref_file",
+    "inception_ref",
     metavar="NPZ|URL",
     type=str,
     required=False,
-    help="Dataset reference Inception statistics (required for FID)",
+    help="Dataset reference Inception statistics (required for FID and PRDC)",
+)
+@click.option(
+    "--dino-ref",
+    "dino_ref",
+    metavar="NPZ|URL",
+    type=str,
+    required=False,
+    help="Dataset reference DINO statistics (required for PRCD-DINO)",
 )
 @click.option(
     "--seed",
@@ -1180,7 +1194,8 @@ def dino_stats(img_path, seed, batch_size, reset):
 def eval(
     img_path,
     metrics,
-    inception_ref_file,
+    inception_ref,
+    dino_ref,
     seed,
     # Options for PCA
     pca,
@@ -1196,79 +1211,129 @@ def eval(
     """Evaluate metrics for a given set of generated images."""
 
     # Checking arguments.
-    metrics = [m.lower() for m in metrics]
+    metrics = [m.lower().replace("_", "-") for m in metrics]
     click.echo(f"Metrics requested: {metrics}")
 
-    if "fid" in metrics and inception_ref_file is None:
+    if (set(metrics) & {"fid", "toppr"}) and inception_ref is None:
         raise click.UsageError(
-            "--inception-ref is required when 'fid' is included in --metrics"
+            "--inception-ref is required when 'fid' or 'toppr' is included in --metrics"
+        )
+    if (set(metrics) & {"toppr-dino"}) and dino_ref is None:
+        raise click.UsageError(
+            "--dino-ref is required when 'toppr-dino' is included in --metrics"
         )
 
     # Checking files.
-    out_path = os.path.dirname(img_path)
-    inception_file = os.path.join(out_path, INCEPTION_FILE)
-    dino_file = os.path.join(out_path, DINO_FILE)
+    data_path = Path(img_path).parent
+    inception_stats = data_path / INCEPTION_STATS_FILE
+    dino_stats = data_path / DINO_STATS_FILE
 
-    if "fid" in metrics and not os.path.exists(inception_ref_file):
-        raise FileNotFoundError(f"Missing ref {inception_ref_file}. Run `ref` first.")
+    if set(metrics) & {"fid", "toppr"}:
+        if not os.path.exists(inception_ref):
+            raise FileNotFoundError(f"Missing {inception_ref}. Run `inception-ref`.")
+        elif not os.path.exists(inception_stats):
+            raise FileNotFoundError(
+                f"Missing {inception_stats}. Run `inception-stats`."
+            )
 
-    if not os.path.exists(inception_file):
-        raise FileNotFoundError(f"Missing stats {inception_file}. Run `stats` first.")
-
-    if not os.path.exists(dino_file):
-        raise FileNotFoundError(f"Missing stats {dino_file}. Run `dino-stats` first.")
+    if set(metrics) & {"toppr-dino"}:
+        if not os.path.exists(dino_ref):
+            raise FileNotFoundError(f"Missing {dino_ref}. Run `dino-ref`.")
+        if not os.path.exists(dino_stats):
+            raise FileNotFoundError(f"Missing {dino_stats}. Run `dino-stats`.")
 
     # Distribute.
+    # FIX: no need to distribute the evaluation across multiple processes, since the
+    # metrics are not calculated on a per-image basis. However, we still need to init
+    # the distributed environment for loading the features and stats (which are saved in a distributed manner).
     torch.multiprocessing.set_start_method("spawn")
     dist.init()
 
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    # Loading Inception ref.
+    # Load Inception ref.
     if set(metrics) & {"fid", "toppr"}:
-        dist.print0("Loading Inception reference...")
+        dist.print0(
+            "\n"
+            "Loading Inception reference...\n"
+            "------------------------------------------------------------"
+        )
 
         label = 0
-        ref_files = [inception_ref_file]
-        while os.path.exists(inception_ref_file.split(".")[0] + f"-{label}.npz"):
-            ref_files.append(inception_ref_file.split(".")[0] + f"-{label}.npz")
+        ref_files = [inception_ref]
+        while os.path.exists(inception_ref.split(".")[0] + f"-{label}.npz"):
+            ref_files.append(inception_ref.split(".")[0] + f"-{label}.npz")
             label += 1
 
         inception_refs = []
+        for ref_file in ref_files:
+            dist.print0(ref_file)
+
+            if dist.get_rank() == 0:
+                with dnnlib.util.open_url(ref_file) as f:
+                    inception_refs.append(dict(np.load(f)))
+                # dist.print0(f"Ref file keys: {list(inception_refs[-1].keys())}")
+                dist.print0(f"Features: {len(inception_refs[-1]['inception_feats'])}")
+
+    # Load DINO ref.
+    if set(metrics) & {"toppr-dino"}:
+        dist.print0(
+            "\n"
+            "Loading DINO reference...\n"
+            "------------------------------------------------------------"
+        )
+
+        label = 0
+        ref_files = [dino_ref]
+        while os.path.exists(dino_ref.split(".")[0] + f"-{label}.npz"):
+            ref_files.append(dino_ref.split(".")[0] + f"-{label}.npz")
+            label += 1
+
+        dino_refs = []
         for ref_file in ref_files:
             dist.print0(f"Using dataset reference statistics from: {ref_file}")
 
             if dist.get_rank() == 0:
                 with dnnlib.util.open_url(ref_file) as f:
-                    inception_refs.append(dict(np.load(f)))
-                dist.print0(f"Ref file keys: {list(inception_refs[-1].keys())}")
-                dist.print0(len(inception_refs[-1]["inception_feats"]))
+                    dino_refs.append(dict(np.load(f)))
+                # dist.print0(f"Ref file keys: {list(dino_refs[-1].keys())}")
+                dist.print0(len(dino_refs[-1]["dino_feats"]))
 
     # Load Inception stats.
     if set(metrics) & {"fid", "toppr"}:
-        dist.print0("Loading Inception statistics...")
+        dist.print0(
+            "\n"
+            "Loading Inception statistics...\n"
+            "------------------------------------------------------------"
+        )
 
         if dist.get_rank() == 0:
-            with dnnlib.util.open_url(inception_file) as f:
-                feature_settings = dict(np.load(f, allow_pickle=True).item())
-                inception_feats = feature_settings["inception_feats"]
-                inception_mus = feature_settings["inception_mus"]
-                inception_sigmas = feature_settings["inception_sigmas"]
+            with dnnlib.util.open_url(str(inception_stats)) as f:
+                inception_data = dict(np.load(f, allow_pickle=True).item())
+                inception_feats = inception_data["inception_feats"]
+                inception_mus = inception_data["inception_mus"]
+                inception_sigmas = inception_data["inception_sigmas"]
 
     # Load DINO stats.
     if set(metrics) & {"toppr-dino"}:
-        dist.print0("Loading DINO statistics...")
+        dist.print0(
+            "\n"
+            "Loading DINO statistics...\n"
+            "------------------------------------------------------------"
+        )
 
         if dist.get_rank() == 0:
-            with dnnlib.util.open_url(dino_file) as f:
-                feature_settings = dict(np.load(f, allow_pickle=True).item())
-                dino_feats = feature_settings["dino_feats"]
-                dino_mus = feature_settings["dino_mus"]
-                dino_sigmas = feature_settings["dino_sigmas"]
+            with dnnlib.util.open_url(str(dino_stats)) as f:
+                dino_data = dict(np.load(f, allow_pickle=True).item())
+                dino_feats = dino_data["dino_feats"]
+                # dino_mus = dino_data["dino_mus"]
+                # dino_sigmas = dino_data["dino_sigmas"]
 
     # Prepare computations.
-    num_labels = len(inception_mus) - 1
+    num_labels = len(inception_feats) - 1
+    assert num_labels == len(dino_feats) - 1, "Inception and DINO lengths must match."
+
     data = {"overall": {}}
     data.update({i: {} for i in range(num_labels)})
 
@@ -1277,12 +1342,16 @@ def eval(
 
     # Compute FID.
     if "fid" in metrics:
-        dist.print0("Computing FID...")
+        dist.print0(
+            "\n"
+            "Computing FID...\n"
+            "------------------------------------------------------------"
+        )
 
         if dist.get_rank() == 0:
             for i in range(1 + num_labels):
                 metric_name = "Overall" if i == 0 else f"Label {i}"
-                dist.print0(f"Computing {metric_name} FID on {img_path}.")
+                # dist.print0(f"Computing {metric_name} FID on {img_path}.")
 
                 fid = compute_fid(
                     inception_mus[i],
@@ -1298,31 +1367,46 @@ def eval(
 
     # Compute PRDC with TopP&R.
     if "toppr" in metrics:
-        dist.print0("Computing PRDC with TopP&R...")
         dist.print0(
-            f"Settings — "
-            f"alpha={tpr_alpha}, randproj={tpr_randproj}, l2norm={tpr_l2norm}, n={tpr_n} (out of 20k), repeats={tpr_reps}"
+            "\n"
+            "Computing PRDC with TopP&R...\n"
+            "------------------------------------------------------------"
+        )
+        dist.print0(
+            f"Settings \n"
+            f"\t alpha={tpr_alpha} \n"
+            f"\t randproj={tpr_randproj} \n"
+            f"\t l2norm={tpr_l2norm} \n"
+            f"\t n={tpr_n} (out of 20k) \n"
+            f"\t frepeats={tpr_reps} \n"
         )
 
-        num_features = [f.shape[0] for f in inception_feats]
-        features = [f[:20000] for f in inception_feats]
+        num_feats_refs = [ref["inception_feats"].shape[0] for ref in inception_refs]
+        num_feats_stats = [f.shape[0] for f in inception_feats]
+        num_features = [
+            min(n1, n2) for (n1, n2) in zip(num_feats_refs, num_feats_stats)
+        ]
+        # features = [f[:20000] for f in inception_feats]
 
         if dist.get_rank() == 0:
             for i in range(1 + num_labels):
                 metric_name = "Overall" if i == 0 else f"Label {i}"
-                dist.print0(f"Computing {metric_name} PRDC on {img_path} with TopP&R.")
+                dist.print0(f"{metric_name} PRDC on {img_path}")
 
                 # Inception TopPR
-                Ps, Rs, Ds, Cs = [], [], [], []
-                pool_size = min(20_000, features[i].shape[0])
+                Ps_inc, Rs_inc = [], []
+                # Ds_inc, Cs_inc = [], []
+                pool_size = min(20_000, num_features[i])
                 use_n = min(tpr_n, pool_size)
+                dist.print0(f"\t using {use_n} / {pool_size} features")
 
                 num_test = tpr_reps
+                dist.print0(f"\t averaging result over {num_test} runs")
 
                 for _ in range(num_test):
                     index = np.random.permutation(pool_size)[:use_n]
                     feats_ref = inception_refs[i]["inception_feats"][index]
-                    feats = features[i][index]
+                    feats = inception_feats[i][index]
 
                     if pca:
                         feats_ref, feats = PCA(
@@ -1331,7 +1415,8 @@ def eval(
                             pca_dim=pca_dim,
                             whiten=whiten,
                         )
-                    Pinc, Rinc = compute_top_pr(
+
+                    P_inc, R_inc = compute_top_pr(
                         real_features=feats_ref,
                         fake_features=feats,
                         alpha=tpr_alpha,
@@ -1340,73 +1425,90 @@ def eval(
                         f1_score=False,
                         l2norm=tpr_l2norm,
                     )
+                    # D_inc, C_inc = 0, 0
 
-                    Dinc, Cinc = 0, 0
-                    Ps.append(Pinc)
-                    Rs.append(Rinc)
-                    Ds.append(Dinc)
-                    Cs.append(Cinc)
+                    Ps_inc.append(P_inc)
+                    Rs_inc.append(R_inc)
+                    # Ds_inc.append(D_inc)
+                    # Cs_inc.append(C_inc)
 
-                Pinc = np.mean(Ps)
-                Rinc = np.mean(Rs)
-                Dinc = np.mean(Ds)
-                Cinc = np.mean(Cs)
-                Pinc_std = np.std(Ps)
-                Rinc_std = np.std(Rs)
-                Dinc_std = np.std(Ds)
-                Cinc_std = np.std(Cs)
+                P_inc = np.mean(Ps_inc)
+                R_inc = np.mean(Rs_inc)
+                # D_inc = np.mean(Ds_inc)
+                # C_inc = np.mean(Cs_inc)
+                P_inc_std = np.std(Ps_inc)
+                R_inc_std = np.std(Rs_inc)
+                # D_inc_std = np.std(Ds_inc)
+                # C_inc_std = np.std(Cs_inc)
 
-                dist.print0(f"{metric_name} TopP&R results:")
                 dist.print0(
-                    f"P: {Pinc:.4f} pm {Pinc_std:.4f}, "
-                    f"R: {Rinc:.4f} pm {Rinc_std:.4f}, "
-                    f"D: {Dinc:.4f} pm {Dinc_std:.4f}, "
-                    f"C: {Cinc:.4f} pm {Cinc_std:.4f}"
+                    f"Results: \n"
+                    f"\t P_inc: {P_inc:.4f} pm {P_inc_std:.4f} \n"
+                    f"\t R_inc: {R_inc:.4f} pm {R_inc_std:.4f} \n"
+                    # f"\t D_inc: {D_inc:.4f} pm {D_inc_std:.4f} \n"
+                    # f"\t C_inc: {C_inc:.4f} pm {C_inc_std:.4f} \n"
                 )
 
                 key = metric_key(i)
                 data[key].update(
                     {
-                        "P": Pinc,
-                        "R": Rinc,
-                        "D": Dinc,
-                        "C": Cinc,
-                        "P_std": Pinc_std,
-                        "R_std": Rinc_std,
-                        "D_std": Dinc_std,
-                        "C_std": Cinc_std,
+                        "P_inc": P_inc,
+                        "R_inc": R_inc,
+                        # "D_inc": D_inc,
+                        # "C_inc": C_inc,
+                        "P_inc_std": P_inc_std,
+                        "R_inc_std": R_inc_std,
+                        # "D_inc_std": D_inc_std,
+                        # "C_inc_std": C_inc_std,
                         "num_features": num_features[i],
                     }
                 )
+
     # Compute PRDC with TopP&R DINO.
     if "toppr-dino" in metrics:
-        dist.print0("Computing PRDC with TopP&R DINO...")
         dist.print0(
-            f"Settings — "
-            f"alpha={tpr_alpha}, randproj={tpr_randproj}, l2norm={tpr_l2norm}, n={tpr_n} (out of 20k), repeats={tpr_reps}"
+            "\n"
+            "Computing PRDC with TopP&R DINO...\n"
+            "------------------------------------------------------------"
+        )
+        dist.print0(
+            f"Settings \n"
+            f"\t alpha={tpr_alpha} \n"
+            f"\t randproj={tpr_randproj} \n"
+            f"\t l2norm={tpr_l2norm} \n"
+            f"\t n={tpr_n} (out of 20k) \n"
+            f"\t frepeats={tpr_reps} \n"
         )
 
-        num_features = [f.shape[0] for f in dino_feats]
-        features = [f[:20000] for f in dino_feats]
+        num_feats_refs = [ref["dino_feats"].shape[0] for ref in dino_refs]
+        num_feats_stats = [f.shape[0] for f in dino_feats]
+        num_features = [
+            min(n1, n2) for (n1, n2) in zip(num_feats_refs, num_feats_stats)
+        ]
+        # num_features = [f.shape[0] for f in dino_feats]
+        # features = [f[:20000] for f in dino_feats]
 
         if dist.get_rank() == 0:
             for i in range(1 + num_labels):
                 metric_name = "Overall" if i == 0 else f"Label {i}"
                 dist.print0(f"Computing {metric_name} PRDC on {img_path} with TopP&R.")
 
-                # Inception TopPR
-                Ps_dino, Rs_dino, Ds_dino, Cs_dino = [], [], [], []
-                pool_size = min(20_000, features[i].shape[0])
+                # DINO TopPR
+                Ps_dino, Rs_dino = [], []
+                # Ds_dino, Cs_dino = [], []
+                # pool_size = min(20_000, features[i].shape[0])
+                pool_size = min(20_000, num_features[i])
                 use_n = min(tpr_n, pool_size)
+                dist.print0(f"\t using {use_n} / {pool_size}) features")
 
                 num_test = tpr_reps
-
-                # FIX: continue to rename dino
+                dist.print0(f"\t averaging result over {num_test} runs")
 
                 for _ in range(num_test):
                     index = np.random.permutation(pool_size)[:use_n]
-                    feats_ref = inception_refs[i]["inception_feats"][index]
-                    feats = features[i][index]
+                    feats_ref = dino_refs[i]["dino_feats"][index]
+                    # feats = features[i][index]
+                    feats = dino_feats[i][index]
 
                     if pca:
                         feats_ref, feats = PCA(
@@ -1415,7 +1517,7 @@ def eval(
                             pca_dim=pca_dim,
                             whiten=whiten,
                         )
-                    Pinc, Rinc = compute_top_pr(
+                    P_dino, R_dino = compute_top_pr(
                         real_features=feats_ref,
                         fake_features=feats,
                         alpha=tpr_alpha,
@@ -1424,47 +1526,47 @@ def eval(
                         f1_score=False,
                         l2norm=tpr_l2norm,
                     )
+                    # D_dino, C_dino = 0, 0
 
-                    Dinc, Cinc = 0, 0
-                    Ps.append(Pinc)
-                    Rs.append(Rinc)
-                    Ds.append(Dinc)
-                    Cs.append(Cinc)
+                    Ps_dino.append(P_dino)
+                    Rs_dino.append(R_dino)
+                    # Ds_dino.append(D_dino)
+                    # Cs_dino.append(C_dino)
 
-                Pinc = np.mean(Ps)
-                Rinc = np.mean(Rs)
-                Dinc = np.mean(Ds)
-                Cinc = np.mean(Cs)
-                Pinc_std = np.std(Ps)
-                Rinc_std = np.std(Rs)
-                Dinc_std = np.std(Ds)
-                Cinc_std = np.std(Cs)
+                P_dino = np.mean(Ps_dino)
+                R_dino = np.mean(Rs_dino)
+                # D_dino = np.mean(Ds_dino)
+                # C_dino = np.mean(Cs_dino)
+                P_dino_std = np.std(Ps_dino)
+                R_dino_std = np.std(Rs_dino)
+                # D_dino_std = np.std(Ds_dino)
+                # C_dino_std = np.std(Cs_dino)
 
-                dist.print0(f"{metric_name} TopP&R results:")
                 dist.print0(
-                    f"P: {Pinc:.4f} pm {Pinc_std:.4f}, "
-                    f"R: {Rinc:.4f} pm {Rinc_std:.4f}, "
-                    f"D: {Dinc:.4f} pm {Dinc_std:.4f}, "
-                    f"C: {Cinc:.4f} pm {Cinc_std:.4f}"
+                    f"Results: \n"
+                    f"\t P_dino: {P_dino:.4f} pm {P_dino_std:.4f} \n"
+                    f"\t R_dino: {R_dino:.4f} pm {R_dino_std:.4f} \n"
+                    # f"\t D_dino: {D_dino:.4f} pm {D_dino_std:.4f} \n"
+                    # f"\t C_dino: {C_dino:.4f} pm {C_dino_std:.4f} \n"
                 )
 
                 key = metric_key(i)
                 data[key].update(
                     {
-                        "P": Pinc,
-                        "R": Rinc,
-                        "D": Dinc,
-                        "C": Cinc,
-                        "P_std": Pinc_std,
-                        "R_std": Rinc_std,
-                        "D_std": Dinc_std,
-                        "C_std": Cinc_std,
-                        "num_features": num_features[i],
+                        "P_dino": P_dino,
+                        "R_dino": R_dino,
+                        # "D_dino": D_dino,
+                        # "C_dino": C_dino,
+                        "P_dino_std": P_dino_std,
+                        "R_dino_std": R_dino_std,
+                        # "D_dino_std": D_dino_std,
+                        # "C_dino_std": C_dino_std,
                     }
                 )
 
-    with open(os.path.join(out_path, "evaluation.jsonl"), "w") as file:
-        json.dump(data, file, indent=4)
+    if dist.get_rank() == 0:
+        with open(os.path.join(data_path, "evaluation.jsonl"), "w") as file:
+            json.dump(data, file, indent=4)
 
     torch.distributed.barrier()
 
