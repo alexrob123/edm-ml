@@ -10,6 +10,7 @@
 """Streaming images and labels from datasets created with dataset_tool.py."""
 
 import json
+import logging
 import os
 import zipfile
 
@@ -23,6 +24,13 @@ try:
     import pyspng
 except ImportError:
     pyspng = None
+
+logging.basicConfig(
+    format="[%(levelname)s] %(name)s: %(message)s",
+    level=logging.INFO,
+    force=True,
+)
+logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------------
 # Abstract base class for datasets.
@@ -39,6 +47,9 @@ class Dataset(torch.utils.data.Dataset):
         random_seed=0,  # Random seed to use when applying max_size.
         cache=False,  # Cache images in CPU memory?
     ):
+        if not use_labels:
+            logger.info(f"use_labels for dataset {name} is set to FALSE.")
+
         self._name = name
         self._raw_shape = list(raw_shape)
         self._use_labels = use_labels
