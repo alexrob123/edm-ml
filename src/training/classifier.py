@@ -146,3 +146,29 @@ class FeatureExtractor(nn.Module):
             self.model.device
         )
         return self.model(**x).hidden_states[-1][:, 0, :].squeeze(1)
+
+
+def prepare_dino_model(num_labels):
+    processor = AutoImageProcessor.from_pretrained(
+        "facebook/dinov2-base",
+        use_fast=True,
+    )
+
+    model = AutoModelForImageClassification.from_pretrained(
+        "facebook/dinov2-base",
+        num_labels=num_labels,
+    )
+    model = nn.DataParallel(model)  # FIX: REMOVE OR CHANGE TO DDP
+
+    logger.info(f"Model architecture: \n{model.module}")
+
+    # Freeze DINOv2 backbone
+    for param in model.module.dinov2.parameters():
+        param.requires_grad = False
+
+    # Unfreeze last 4 layers of the transformer
+    for layer in model.module.dinov2.encoder.layer[-4:]:
+        for param in layer.parameters():
+            param.requires_grad = True
+
+    return processor, model

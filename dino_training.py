@@ -6,17 +6,19 @@
 # Change in the way the predictions is derived from loggits
 # FIX: change accuracy computation for br method
 
-import argparse
 import logging
 from pathlib import Path
 
+import click
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoImageProcessor, AutoModelForImageClassification
 
+from datatools.utils import extract_dataset_name
 from training import dataset
+from training.classifier import prepare_dino_model
 
 logging.basicConfig(
     level=logging.INFO,
@@ -58,69 +60,113 @@ def lp_accuracy_computation(true, pred):
     pass
 
 
-def prepare_model(num_labels):
-    processor = AutoImageProcessor.from_pretrained(
-        "facebook/dinov2-base",
-        use_fast=True,
-    )
-
-    model = AutoModelForImageClassification.from_pretrained(
-        "facebook/dinov2-base",
-        num_labels=num_labels,
-    )
-    model = nn.DataParallel(model)  # FIX: REMOVE OR CHANGE TO DDP
-
-    logger.info(f"Model architecture: \n{model.module}")
-
-    # Freeze DINOv2 backbone
-    for param in model.module.dinov2.parameters():
-        param.requires_grad = False
-
-    # Unfreeze last 4 layers of the transformer
-    for layer in model.module.dinov2.encoder.layer[-4:]:
-        for param in layer.parameters():
-            param.requires_grad = True
-
-    return processor, model
+####################################################################################################
+####################################################################################################
+####################################################################################################
 
 
-# MAIN #
-
-
-def main(args):
-    logger.info(f"{'EVALUATION' if args.evaluate else 'TRAINING'}")
+@click.command()
+@click.option(
+    "--name",
+    "name",
+    type=str,
+    default="dino",
+    help="Experiment name used in checkpoint path.",
+)
+@click.option(
+    "--method",
+    "method",
+    type=click.Choice(["br", "lp"]),
+    required=True,
+    help="Multi-label learning method.",
+)
+@click.option(
+    "--data-path",
+    "data_path",
+    type=click.Path(exists=True),
+    required=True,
+    metavar="DIR|ZIP",
+    help="Directory containing dataset files or zip file.",
+)
+@click.option(
+    "--num-labels",
+    "num_labels",
+    type=int,
+    required=True,
+    help="Number of labels in dataset (not labelsets).",
+)
+@click.option(
+    "--batch",
+    "batch_size",
+    type=int,
+    default=256,
+    show_default=True,
+    help="Batch size for train and validation dataloaders.",
+)
+@click.option(
+    "--epochs",
+    "num_epochs",
+    type=int,
+    default=10,
+    show_default=True,
+    help="Number of epochs for training.",
+)
+@click.option(
+    "--seed",
+    "seed",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Seed for randomness.",
+)
+@click.option(
+    "--evaluate",
+    "evaluate",
+    is_flag=True,
+    help="Run a single evaluation epoch.",
+)
+def main(
+    name,
+    method,
+    data_path,
+    num_labels,
+    batch_size,
+    num_epochs,
+    seed,
+    evaluate,
+):
+    logger.info(f"{'EVALUATION' if evaluate else 'TRAINING'}")
 
     ### CONFIG ###
-    NAME = args.name
+    data_path = Path(data_path).expanduser()
+    dataset_name = extract_dataset_name(data_path)
 
-    data_dir = Path(args.data_dir).expanduser()
-    data_file = args.dataset
-    DATA_PATH = data_dir / data_file
-
-    dataset_name, _ = data_file.split(".")
-
-    if NAME is None:
-        ckpt_dir = Path.cwd() / "ckpts" / dataset_name
+    if name is None:
+        ckpt_dir = Path.cwd() / "checkpoints" / dataset_name
+        eval_dir = Path.cwd() / "outputs" / dataset_name
     else:
-        ckpt_dir = Path.cwd() / "ckpts" / NAME / dataset_name
+        ckpt_dir = Path.cwd() / "checkpoints" / name / dataset_name
+        eval_dir = Path.cwd() / "outputs" / name / dataset_name
+
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_file = f"dino_finetuning_{args.method}.pth"
-    CKPT_PATH = ckpt_dir / ckpt_file
-
-    eval_dir = Path.cwd() / "output" / dataset_name
     eval_dir.mkdir(parents=True, exist_ok=True)
-    eval_file = f"dino_finetuned_{args.method}.pth"
-    EVAL_PATH = eval_dir / eval_file
 
-    logger.info(f"Data in {DATA_PATH}")
-    logger.info(f"Checkpoints in {CKPT_PATH}")
+    ckpt_file = "dino_finetuning.pth"
+    eval_file = "dino_finetuned.pth"
 
-    EVALUATE = args.evaluate
-    METHOD = args.method
+    ckpt_path = ckpt_dir / ckpt_file
+    eval_path = eval_dir / eval_file
+
+    logger.info(f"Data in {data_path}")
+    logger.info(f"Checkpoints in {ckpt_path}")
+    logger.info(f"Evaluation results in {eval_path}")
+
+    EVALUATE = evaluate
+    METHOD = method
 
     NUM_LABELS_FOR_MODEL = {
-        "br": args.num_labels,
-        "lp": 2**args.num_labels,
+        "br": num_labels,
+        "lp": 2**num_labels,
     }
     CRITERION = {  # reduction="mean" by default,
         "br": nn.BCEWithLogitsLoss(),
@@ -139,15 +185,15 @@ def main(args):
         "lp": None,
     }
 
-    SEED = args.seed
-    BATCH_SIZE = args.batch_size
-    NUM_EPOCHS = args.num_epochs
+    SEED = seed
+    BATCH_SIZE = batch_size
+    NUM_EPOCHS = num_epochs
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     ### DATA ###
 
     full_dataset = dataset.ImageFolderDataset(
-        path=DATA_PATH,
+        path=data_path,
         resolution=64,  # FIX: PUT TO 224 FOR DINOv2 ?
         use_labels=True,
         max_size=None,
@@ -171,7 +217,7 @@ def main(args):
 
     ### MODEL ###
 
-    processor, model = prepare_model(NUM_LABELS_FOR_MODEL[METHOD])
+    processor, model = prepare_dino_model(NUM_LABELS_FOR_MODEL[METHOD])
     model.to(DEVICE)
 
     ### SETUP ###
@@ -196,18 +242,18 @@ def main(args):
         "accuracy": [],
     }
 
-    if EVALUATE and CKPT_PATH.exists():
-        ckpt = torch.load(CKPT_PATH, map_location=DEVICE)
+    if EVALUATE and ckpt_path.exists():
+        ckpt = torch.load(ckpt_path, map_location=DEVICE)
 
         model.module.load_state_dict(ckpt["model"])
 
         logger.info(f"Evaluating checkpoint — epoch {monitor['epoch']} ")
 
     elif EVALUATE:
-        raise ValueError(f"Can't evaluate ckpt {CKPT_PATH} because it does not exist")
+        raise ValueError(f"Can't evaluate ckpt {ckpt_path} because it does not exist")
 
-    elif CKPT_PATH.exists():
-        ckpt = torch.load(CKPT_PATH, map_location=DEVICE)
+    elif ckpt_path.exists():
+        ckpt = torch.load(ckpt_path, map_location=DEVICE)
 
         model.module.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
@@ -313,7 +359,7 @@ def main(args):
                     "model": model.module.state_dict(),
                     "monitor": monitor,
                 },
-                EVAL_PATH,
+                eval_path,
             )
             # Do not run further epochs.
             break
@@ -327,78 +373,23 @@ def main(args):
                     "scheduler": scheduler.state_dict(),
                     "monitor": monitor,
                 },
-                CKPT_PATH,
+                ckpt_path,
+            )
+            torch.save(
+                {
+                    "model": model.module.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                    "monitor": monitor,
+                },
+                data_path.parent / "dino_finetuned.pth",
             )
 
     logger.info("THE END")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Training with Dino")
-    parser.add_argument(
-        "--name",
-        "-xp",
-        type=str,
-        default="",
-        help="name for the xp, will go on the ckpt name",
-    )
-    parser.add_argument(
-        "--method",
-        "-m",
-        type=str,
-        required=True,
-        choices=["br", "lp"],
-        help="Multi-Label Learning method.",
-    )
-    parser.add_argument(
-        "--data-dir",
-        "-dd",
-        type=str,
-        help="Data Directory.",
-    )
-    parser.add_argument(
-        "--dataset",
-        "-d",
-        type=str,
-        required=True,
-        help="Dataset name. Either a dir name or a zip file.",
-    )
-    parser.add_argument(
-        "--num-labels",
-        "-nl",
-        type=int,
-        required=True,
-        help="Number of labels in dataset (not labelsets!)",
-    )
-    parser.add_argument(
-        "--batch-size",
-        "-bs",
-        type=int,
-        default=128,
-        help="Batch size for train and val dataloaders.",
-    )
-    parser.add_argument(
-        "--num-epochs",
-        "-ne",
-        type=int,
-        default=10,
-        help="Number of epochs for training.",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=0,
-        help="Seed for randomness.",
-    )
-    parser.add_argument(
-        "--evaluate",
-        action="store_true",
-        help="Run a test epoch",
-    )
-
-    args = parser.parse_args()
-
-    main(args)
+    main()
 
     # data_dir: ~/data/CelebA/AlignedCropped/_edm64
     # dataset: 50eb47c0
