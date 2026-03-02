@@ -27,6 +27,25 @@ def read_br_dataset_meta(path):
 # ----------------------------------------------------------------------------------------------------
 
 
+def mhe2labs(mhe, labelspace):
+    mhe = np.asarray(mhe)
+    labelspace = np.asarray(labelspace)
+
+    is_1d = mhe.ndim == 1
+    if is_1d:
+        mhe = mhe[None, :]
+
+    out = [[] for _ in range(mhe.shape[0])]
+    rows, cols = np.where(mhe == 1)
+
+    for r, c in zip(rows, cols):
+        out[r].append(
+            labelspace[c].item() if hasattr(labelspace[c], "item") else labelspace[c]
+        )
+
+    return out[0] if is_1d else out
+
+
 def lp_to_bl(classes, label_space, class2labelset):
     """
     Convert Label Powerset classes to Binary Labelset

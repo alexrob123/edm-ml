@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from zipfile import ZipFile
@@ -59,6 +60,20 @@ def zip_labels(path):
 
     labels = [x[1] for x in data["labels"]]
     return labels
+
+
+# Hashing
+# ----------------------------------------------------------------------------------------------------
+
+
+def generate_hash(attrs: list[str]) -> str:
+    """
+    Generate a name and short hash from a list of attribute names.
+    Deterministic: same list → same hash.
+    """
+    name = "_".join([s.replace("_", "") for s in sorted(attrs)])
+    hash = hashlib.sha1(name.encode()).hexdigest()[:8]
+    return hash
 
 
 # Json utils

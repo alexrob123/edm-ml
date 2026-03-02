@@ -24,48 +24,40 @@ or [download dataset](http://mmlab.ie.cuhk.edu.hk/projects/CelebA.html) by hand.
 For a given selection of labels among all available lables, defining a label space $\mathcal{L}$, the original dataset is split into non-overlapping classes, or label combinations, corresponding to the labelsets in the powerset of $\mathcal{L}$. Each subset is stored in a separate folder containing all images corresponding to that specific Labelset.
 
 ```bash
-uv run build_subsets.py \
-    --data-dir ~/data/CelebA \
-    --img-dir img_align_celeba \
-    --attr-file list_attr_celeba.txt \
-    --out-dir powerset_partitions \
-    --attrs Bangs Eyeglasses Male Smiling
+uv run restructure_dataset.py \
+    --data ./data/CelebA/img_align_celeba.zip \
+    --labels ./data/CelebA/list_attr_celeba.txt \
+    --selection Bangs --selection Eyeglasses --selection Male --selection Smiling \
+    --method br \
+    --outdir ./data/CelebA/edited/
 ```
 
 With default parameters, data directory should look like:
 
 ```
-~/data/CelebA
+./data/CelebA
 ├── list_attr_celeba.txt
 ├── img_align_celeba.zip
 ├── img_align_celeba
-└── powerset_partitions
-```
-
-```
-~/data/CelebA/powerset_partitions
-    ├── labelspace_hash
-    │   ├── labelset1_hash
-    │   │   ├── 000003.jpg
-    │   │   └── 000007.jpg
-    │   ├── labelset2_hash
-    │   │   ├── 000001.jpg
-    │   │   └── 000002.jpg
-    │   ├── ...
-    │   └── metadata.json
+└── edited
+    ├── BR-50eb47c0
+    │   └── dataset_raw.zip
+    ├── LP-50eb47c0
+    │   └── dataset_raw.zip
+    ...
 ```
 
 The dataset structure is built to be compatible with [EDM project](https://github.com/NVlabs/edm) and can be ingested directly using `dataset_tool.py`. More information on the tool in [`python dataset_tool.py --help`](https://github.com/NVlabs/edm/blob/main/docs/dataset-tool-help.txt).
 
 ```bash
 uv run dataset_tool.py \
-    --source ~/data/CelebA/powerset_partitions/<labelspace_hash> \
-    --dest  ~/data/CelebA/edm-64x64/<labelspace_hash>.zip \
+    --source ./data/CelebA/edited/<dataset-name>/dataset_raw.zip \
+    --dest  ./data/CelebA/edited/<dataset-name>/dataset.zip \
     --transform center-crop \
     --resolution 64x64
 ```
 
-Alternatively (and equivalently) run:
+Alternatively (might not be equivalent after reworking) run:
 
 ```bash
 git clone git@github.com:NVlabs/edm.git
@@ -73,8 +65,8 @@ cd edm
 conda env create -f environment.yml -n edm
 conda activate edm
 python dataset_tool.py \
-    --source ~/data/CelebA/powerset_partitions/<labelspace_hash> \
-    --dest  ~/data/CelebA/edm-64x64/<labelspace_hash>.zip \
+    --source ./data/CelebA/edited/<dataset-name>/dataset_raw.zip \
+    --dest  ./data/CelebA/edited/<dataset-name>/dataset.zip \
     --transform center-crop \
     --resolution 64x64
 ```
