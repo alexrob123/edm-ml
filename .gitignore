@@ -1,6 +1,8 @@
 # Dev directories
 test*
 checkpoints/*
+data
+jeanzay/
 models/*
 notebooks/*
 scripts/*

@@ -3,11 +3,12 @@ name = "edm-ml"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "click>=8.3.1",
     "gdown>=5.2.1",
     "gudhi>=3.11.0",
+    "idr-torch>=2.5.0",
     "imageio-ffmpeg>=0.6.0",
     "matplotlib>=3.10.8",
     "pandas>=2.3.3",
