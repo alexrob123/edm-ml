@@ -293,31 +293,34 @@ class ImageFolderDataset(Dataset):
         labels = {k.replace("\\", "/"): v for k, v in raw}
         labels = [labels[fname.replace("\\", "/")] for fname in self._image_fnames]
 
-        # Multi-Label.
-        if all(isinstance(x, list) for x in labels):
-            # Infer number of labels.
-            max_value = max((x for sub in labels for x in sub), default=-1)
-            num_labels = max_value + 1
-            assert num_labels > 0
+        labels = np.array(labels)
+        labels = labels.astype({1: np.int64, 2: np.float32}[labels.ndim])
+        return labels
 
-            # Multi-hot encoding.
-            multi_hot = np.zeros((len(labels), num_labels), dtype=np.float32)
-            for i, lab_ids in enumerate(labels):
-                if lab_ids:
-                    multi_hot[i, lab_ids] = 1.0
+        # # Multi-Label.
+        # if all(isinstance(x, list) for x in labels):
+        #     # Infer number of labels.
+        #     num_labels = len(labels[0])
+        #     assert num_labels > 0
 
-            return multi_hot
+        #     # Multi-hot encoding.
+        #     multi_hot = np.zeros((len(labels), num_labels), dtype=np.float32)
+        #     for i, lab_ids in enumerate(labels):
+        #         if lab_ids:
+        #             multi_hot[i, lab_ids] = 1.0
 
-        # Mixed format -> error.
-        elif any(isinstance(x, list) for x in labels):
-            raise ValueError("All labels in metadata should have same format")
+        #     return multi_hot
 
-        # Single-Label.
-        else:
-            labels = np.array(labels)
-            labels = labels.astype({1: np.int64, 2: np.float32}[labels.ndim])
+        # # Mixed format -> error.
+        # elif any(isinstance(x, list) for x in labels):
+        #     raise ValueError("All labels in metadata should have same format")
 
-            return labels
+        # # Single-Label.
+        # else:
+        #     labels = np.array(labels)
+        #     labels = labels.astype({1: np.int64, 2: np.float32}[labels.ndim])
+
+        #     return labels
 
 
 # ----------------------------------------------------------------------------
