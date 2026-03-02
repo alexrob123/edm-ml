@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoImageProcessor, AutoModelForImageClassification
 
-from datatools.multilabel import lp_to_bl
+from datatools.multilabel import BATCH_PROCESSING, PRED_PROCESSING
 from datatools.utils import extract_dataset_name, make_json_serializable
 from evaluation.supervised import compute_multiclass_metrics, df_metrics_per_class
 from training import dataset
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 # => we map gen-labels (true labels) to dino-labels (pred labels)
 # ----------------------------------------------------------------------------------------------------
 
-APPLY_LABEL_MAPPING = True
+APPLY_LABEL_MAPPING = False
 
 LABEL_MAPPING = {
     0: 7,
@@ -81,34 +81,9 @@ def map_labels(x: torch.Tensor, mapping: dict[int, int]) -> torch.Tensor:
     return y
 
 
-######################################################################
-
-
-def lp_batch_processing(x, y=None):
-    x = x.to(torch.float32) / 255.0
-    if y is None:
-        return x
-    else:
-        y = torch.argmax(y, dim=1)  # convert from one-hot to class index
-        return x, y
-
-
-def br_batch_processing(x, y=None):
-    pass
-
-
-def lp_pred_processing(outputs):
-    _, preds = torch.max(outputs.logits, 1)
-    return preds
-
-
-def br_pred_processing(outputs):
-    pass
-
-
-######################################################################
-######################################################################
-######################################################################
+####################################################################################################
+####################################################################################################
+####################################################################################################
 
 
 @click.command()
@@ -157,6 +132,8 @@ def br_pred_processing(outputs):
 def main(data_path, model_path, num_labels, method, batch_size, output_path):
     """Evaluate Fine-tuned DINOv2 model on generated images and compute metrics"""
 
+    # Config
+
     data_path = Path(data_path).expanduser()
     model_path = Path(model_path).expanduser()
     if output_path is None:
@@ -171,15 +148,14 @@ def main(data_path, model_path, num_labels, method, batch_size, output_path):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    NUM_LABELS_FOR_MODEL = {
+    num_labels = {
         "br": num_labels,
         "lp": 2**num_labels,
-    }
-    num_labels = NUM_LABELS_FOR_MODEL[method]
+    }[method]
 
     # Load fine-tuned DINOv2 model.
-    # ----------------------------------------------------------------------------------------------------
-    logger.info("MODEL")
+
+    logger.info("Model")
 
     processor, model = prepare_dino_model(num_labels)
 
@@ -208,21 +184,9 @@ def main(data_path, model_path, num_labels, method, batch_size, output_path):
 
     model.to(device)
 
-    # Predict labels for generated images.
-    # ----------------------------------------------------------------------------------------------------
+    # Predict labels for generated images
+
     logger.info("Prediction")
-
-    BATCH_PROCESSING = {
-        "br": lp_batch_processing,
-        "lp": lp_batch_processing,
-    }
-    batch_processing = BATCH_PROCESSING[method]
-
-    PRED_PROCESSING = {
-        "br": lp_pred_processing,
-        "lp": lp_pred_processing,
-    }
-    pred_processing = PRED_PROCESSING[method]
 
     gen_dataset = dataset.ImageFolderDataset(
         path=data_path,
@@ -242,7 +206,7 @@ def main(data_path, model_path, num_labels, method, batch_size, output_path):
 
     pred_batch_pbar = tqdm(gen_loader, leave=False, desc="Prediction")
     for x, y in pred_batch_pbar:
-        x, y = batch_processing(x, y=y)
+        x, y = BATCH_PROCESSING[method](x, y=y)
         true_labels.append(y)
 
         with torch.no_grad():
@@ -250,7 +214,7 @@ def main(data_path, model_path, num_labels, method, batch_size, output_path):
             inputs = inputs.to(device)
             outputs = model(**inputs)
 
-            preds = pred_processing(outputs)
+            preds = PRED_PROCESSING[method](outputs)
             pred_labels.append(preds)
 
     true_label_tensor = torch.concatenate(true_labels)

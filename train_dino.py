@@ -14,8 +14,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import AutoImageProcessor, AutoModelForImageClassification
 
+from datatools.multilabel import BATCH_PROCESSING, PRED_PROCESSING
 from datatools.utils import extract_dataset_name
 from training import dataset
 from training.classifier import prepare_dino_model
@@ -29,116 +29,52 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def br_batch_processing(x, y):
-    x = x.to(torch.float32) / 255.0
-    return x, y
-
-
-def lp_batch_processing(x, y):
-    x = x.to(torch.float32) / 255.0
-    y = torch.argmax(y, dim=1)  # convert from one-hot to class index
-    return x, y
-
-
-def br_pred_processing(outputs):
-    preds = torch.sigmoid(outputs.logits) > 0.5
-    return preds
-
-
-def lp_pred_processing(outputs):
-    _, preds = torch.max(outputs.logits, 1)
-    return preds
+# --------------------------------------------------------------------------------
+# Accuracy computation
 
 
 def br_accuracy_computation(true, pred):
     correct_per_class = ((pred == true).float()).sum(dim=0)  # [C]
     total_per_class = true.shape[0]
     accuracy_per_class = correct_per_class / total_per_class
+    return accuracy_per_class
 
 
 def lp_accuracy_computation(true, pred):
     pass
 
 
+ACC_COMPUTATION = {
+    "br": br_accuracy_computation,
+    "lp": lp_accuracy_computation,
+}
+
+
 ####################################################################################################
 ####################################################################################################
 ####################################################################################################
 
+# fmt: off
 
 @click.command()
-@click.option(
-    "--name",
-    "name",
-    type=str,
-    default="dino",
-    help="Experiment name used in checkpoint path.",
-)
-@click.option(
-    "--method",
-    "method",
-    type=click.Choice(["br", "lp"]),
-    required=True,
-    help="Multi-label learning method.",
-)
-@click.option(
-    "--data-path",
-    "data_path",
-    type=click.Path(exists=True),
-    required=True,
-    metavar="DIR|ZIP",
-    help="Directory containing dataset files or zip file.",
-)
-@click.option(
-    "--num-labels",
-    "num_labels",
-    type=int,
-    required=True,
-    help="Number of labels in dataset (not labelsets).",
-)
-@click.option(
-    "--batch",
-    "batch_size",
-    type=int,
-    default=256,
-    show_default=True,
-    help="Batch size for train and validation dataloaders.",
-)
-@click.option(
-    "--epochs",
-    "num_epochs",
-    type=int,
-    default=10,
-    show_default=True,
-    help="Number of epochs for training.",
-)
-@click.option(
-    "--seed",
-    "seed",
-    type=int,
-    default=0,
-    show_default=True,
-    help="Seed for randomness.",
-)
-@click.option(
-    "--evaluate",
-    "evaluate",
-    is_flag=True,
-    help="Run a single evaluation epoch.",
-)
-def main(
-    name,
-    method,
-    data_path,
-    num_labels,
-    batch_size,
-    num_epochs,
-    seed,
-    evaluate,
-):
+
+@click.option("--name",                 help="Experiment name",                            type=str, default="dino")
+@click.option("--method", "-m",         help="MLL method",                                 type=click.Choice(["br", "lp"]), required=True)
+@click.option("--data", "-d",           help="Path to the dataset", metavar="DIR|ZIP",     type=click.Path(exists=True), required=True)
+@click.option("--num-labels", "-nl",    help="Num labels in dataset (not labelsets)",      type=int, required=True,)
+@click.option("--batch", "batch_size",  help="Batch size",                                 type=int, default=256, show_default=True)
+@click.option("--epochs", "num_epochs", help="Number of epochs for training",              type=int, default=10, show_default=True)
+@click.option("--seed",                 help="Seed for randomness",                        type=int, default=0, show_default=True)
+@click.option( "--evaluate",            help="Run 1 evaluation epoch instead of training", is_flag=True)
+
+# fmt: on
+
+def main(name, method, data, num_labels, batch_size, num_epochs, seed, evaluate):
     logger.info(f"{'EVALUATION' if evaluate else 'TRAINING'}")
 
-    ### CONFIG ###
-    data_path = Path(data_path).expanduser()
+    # Config
+
+    data_path = Path(data).expanduser()
     dataset_name = extract_dataset_name(data_path)
 
     if name is None:
@@ -158,50 +94,23 @@ def main(
     eval_path = eval_dir / eval_file
 
     logger.info(f"Data in {data_path}")
-    logger.info(f"Checkpoints in {ckpt_path}")
-    logger.info(f"Evaluation results in {eval_path}")
+    logger.info(f"Checkpoint in {ckpt_path}")
+    logger.info(f"Evaluation in {eval_path}")
 
-    EVALUATE = evaluate
-    METHOD = method
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    NUM_LABELS_FOR_MODEL = {
-        "br": num_labels,
-        "lp": 2**num_labels,
-    }
-    CRITERION = {  # reduction="mean" by default,
-        "br": nn.BCEWithLogitsLoss(),
-        "lp": nn.CrossEntropyLoss(label_smoothing=0.1),
-    }
-    BATCH_PROCESSING = {
-        "br": br_batch_processing,
-        "lp": lp_batch_processing,
-    }
-    PRED_PROCESSING = {
-        "br": br_pred_processing,
-        "lp": lp_pred_processing,
-    }
-    ACC_COMPUTATION = {
-        "br": None,
-        "lp": None,
-    }
-
-    SEED = seed
-    BATCH_SIZE = batch_size
-    NUM_EPOCHS = num_epochs
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    ### DATA ###
+    # Data
 
     full_dataset = dataset.ImageFolderDataset(
         path=data_path,
-        resolution=64,  # FIX: PUT TO 224 FOR DINOv2 ?
+        resolution=64,
         use_labels=True,
         max_size=None,
         xflip=False,
     )
 
     g = torch.Generator()
-    g.manual_seed(SEED)
+    g.manual_seed(seed)
     indices = torch.randperm(len(full_dataset), generator=g)
     split = int(0.9 * len(full_dataset))
     train_indices, val_indices = indices[:split], indices[split:]
@@ -212,17 +121,25 @@ def main(
     train_dataset = torch.utils.data.Subset(full_dataset, train_indices)
     val_dataset = torch.utils.data.Subset(full_dataset, val_indices)
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size)
 
-    ### MODEL ###
+    # Model
 
-    processor, model = prepare_dino_model(NUM_LABELS_FOR_MODEL[METHOD])
-    model.to(DEVICE)
+    processor, model = prepare_dino_model(
+        {
+            "br": num_labels,
+            "lp": 2**num_labels,
+        }[method]
+    )
+    model.to(device)
 
-    ### SETUP ###
+    # Setup
 
-    criterion = CRITERION[METHOD]
+    criterion = {  # reduction="mean" by default,
+        "br": nn.BCEWithLogitsLoss(),
+        "lp": nn.CrossEntropyLoss(label_smoothing=0.1),
+    }[method]
 
     optimizer = torch.optim.AdamW(
         [
@@ -231,9 +148,9 @@ def main(
         ],
         weight_decay=1e-4,
     )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
 
-    ### CKPT ###
+    # Chekpoint
 
     monitor = {
         "epoch": 0,
@@ -242,18 +159,18 @@ def main(
         "accuracy": [],
     }
 
-    if EVALUATE and ckpt_path.exists():
-        ckpt = torch.load(ckpt_path, map_location=DEVICE)
+    if evaluate and ckpt_path.exists():
+        ckpt = torch.load(ckpt_path, map_location=device)
 
         model.module.load_state_dict(ckpt["model"])
 
         logger.info(f"Evaluating checkpoint — epoch {monitor['epoch']} ")
 
-    elif EVALUATE:
+    elif evaluate:
         raise ValueError(f"Can't evaluate ckpt {ckpt_path} because it does not exist")
 
     elif ckpt_path.exists():
-        ckpt = torch.load(ckpt_path, map_location=DEVICE)
+        ckpt = torch.load(ckpt_path, map_location=device)
 
         model.module.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
@@ -265,38 +182,38 @@ def main(
     else:
         logger.info("Training from scratch")
 
-    ### LOOP ###
+    # Loop
 
     start_epoch = monitor["epoch"]
     best_eval = 1e100 if not monitor["val_loss"] else min(monitor["val_loss"])
 
-    epoch_pbar = tqdm(range(start_epoch + 1, NUM_EPOCHS + 1), desc="Training")
+    epoch_pbar = tqdm(range(start_epoch + 1, num_epochs + 1), desc="Training")
 
     for epoch in epoch_pbar:
         monitor["epoch"] = epoch
 
-        ### TRAIN EPOCH ###
+        # Train epoch
 
-        if EVALUATE:
+        if evaluate:
             monitor["train_loss"].append(0)
 
         else:
             train_batch_pbar = tqdm(
                 train_loader,
                 leave=False,
-                desc=f"Epoch {epoch}/{NUM_EPOCHS}",
+                desc=f"Epoch {epoch}/{num_epochs}",
             )
 
             train_loss = 0
             train_count = 0
 
             for x, y in train_batch_pbar:
-                x, y = BATCH_PROCESSING[METHOD](x, y)
-                x, y = x.to(DEVICE), y.to(DEVICE)
+                x, y = BATCH_PROCESSING[method](x, y)
+                x, y = x.to(device), y.to(device)
                 train_count += x.size(0)
 
                 inputs = processor(images=x, return_tensors="pt", do_rescale=False)
-                inputs.to(DEVICE)
+                inputs = inputs.to(device)
                 outputs = model(**inputs)
 
                 loss = criterion(outputs.logits, y)
@@ -312,7 +229,7 @@ def main(
 
             monitor["train_loss"].append(train_loss / train_count)
 
-        ### VAL EPOCH ###
+        # Val epoch
 
         val_batch_pbar = tqdm(val_loader, leave=False, desc="Validation")
 
@@ -321,19 +238,19 @@ def main(
         val_correct = 0
 
         for x, y in val_batch_pbar:
-            x, y = BATCH_PROCESSING[METHOD](x, y)
-            x, y = x.to(DEVICE), y.to(DEVICE)
+            x, y = BATCH_PROCESSING[method](x, y)
+            x, y = x.to(device), y.to(device)
             val_count += x.size(0)
 
             with torch.no_grad():
                 inputs = processor(images=x, return_tensors="pt", do_rescale=False)
-                inputs = inputs.to(DEVICE)
+                inputs = inputs.to(device)
                 outputs = model(**inputs)
 
                 loss = criterion(outputs.logits, y)
                 val_loss += loss.item() * x.size(0)
 
-                preds = PRED_PROCESSING[METHOD](outputs)
+                preds = PRED_PROCESSING[method](outputs)
                 val_correct += (preds == y).sum().item()
 
                 val_batch_pbar.set_postfix({"Loss": loss.item()})
@@ -343,7 +260,7 @@ def main(
         monitor["val_loss"].append(val_loss / val_count)
         monitor["accuracy"].append(accuracy)
 
-        # END EPOCH
+        # End epoch
 
         epoch_pbar.set_postfix(
             {
@@ -353,7 +270,7 @@ def main(
             }
         )
 
-        if EVALUATE:
+        if evaluate:
             torch.save(
                 {
                     "model": model.module.state_dict(),
@@ -388,11 +305,7 @@ def main(
     logger.info("THE END")
 
 
+# --------------------------------------------------------------------------------
+
 if __name__ == "__main__":
     main()
-
-    # data_dir: ~/data/CelebA/AlignedCropped/_edm64
-    # dataset: 50eb47c0
-
-    # nohup uv run dino.py --data-dir ~/data/CelebA/edm-64x64/ --dataset 50eb47c0.zip --num_classes 16 > dino.log 2>&1 &
-    # nohup uv run dino.py -dd ~/data/CelebA/edm-64x64/ -d 50eb47c0.zip -nc 16 -bs 128 -ne 10 > dino.log 2>&1 &

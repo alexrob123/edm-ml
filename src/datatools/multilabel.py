@@ -2,29 +2,10 @@ import json
 from zipfile import ZipFile
 
 import numpy as np
+import torch
 
-# Metadata
-# ----------------------------------------------------------------------------------------------------
-
-
-def read_lp_dataset_meta(path):
-    with ZipFile(path) as z:
-        with z.open("dataset.json", "r") as j:
-            data = json.load(j)
-
-    labels = [x[1] for x in data["labels"]]
-    labelsets = data["labelsets"]
-    labelspace = data["labelspace"]
-
-    return {"labels": labels, "labelsets": labelsets, "labelspace": labelspace}
-
-
-def read_br_dataset_meta(path):
-    raise NotImplementedError
-
-
-# Convert
-# ----------------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------------
+# Conversions
 
 
 def mhe2labs(mhe, labelspace):
@@ -67,3 +48,67 @@ def lp_to_bl(classes, label_space, class2labelset):
         Y[i, indices] = 1
 
     return Y
+
+
+# --------------------------------------------------------------------------------
+# Metadata
+
+
+def read_lp_dataset_meta(path):
+    with ZipFile(path) as z:
+        with z.open("dataset.json", "r") as j:
+            data = json.load(j)
+
+    labels = [x[1] for x in data["labels"]]
+    labelsets = data["labelsets"]
+    labelspace = data["labelspace"]
+
+    return {"labels": labels, "labelsets": labelsets, "labelspace": labelspace}
+
+
+def read_br_dataset_meta(path):
+    raise NotImplementedError
+
+
+# --------------------------------------------------------------------------------
+# Batch processing
+
+
+def br_batch_processing(x, y):
+    x = x.to(torch.float32) / 255.0
+    return x, y
+
+
+def lp_batch_processing(x, y):
+    x = x.to(torch.float32) / 255.0
+    if y is None:
+        return x
+    else:
+        y = torch.argmax(y, dim=1)  # convert from one-hot to class index
+        return x, y
+
+
+BATCH_PROCESSING = {
+    "br": br_batch_processing,
+    "lp": lp_batch_processing,
+}
+
+
+# --------------------------------------------------------------------------------
+# Prediction processing
+
+
+def br_pred_processing(outputs):
+    preds = torch.sigmoid(outputs.logits) > 0.5
+    return preds
+
+
+def lp_pred_processing(outputs):
+    _, preds = torch.max(outputs.logits, 1)
+    return preds
+
+
+PRED_PROCESSING = {
+    "br": br_pred_processing,
+    "lp": lp_pred_processing,
+}
