@@ -350,11 +350,11 @@ def meta_vs(data_path, gen_path, method, output_path):
     df = format_mean_std(df, decimals=3)
     df = format_colnames(df)
 
-    save_latex_table(
-        df,
-        out_dir=output_path,
-        fname=name,
-    )
+    if output_path is not None:
+        output_path = Path(output_path).expanduser()
+        save_latex_table(df, out_dir=output_path, fname=name)
+
+    return df, name
 
 
 ####################################################################################################
@@ -386,7 +386,6 @@ def dino_eval(input_path, output_path, meta_path):
     """
 
     input_path = Path(input_path).expanduser()
-    output_path = Path(output_path).expanduser()
 
     # Read evaluation
     with open(input_path, "r") as f:
@@ -421,11 +420,10 @@ def dino_eval(input_path, output_path, meta_path):
 
         meta_df = format_mean_std(meta_df, decimals=3)
         meta_df = format_colnames(meta_df)
-        save_latex_table(
-            meta_df,
-            out_dir=output_path,
-            fname=name,
-        )
+
+        if output_path is not None:
+            output_path = Path(output_path).expanduser()
+            save_latex_table(meta_df, out_dir=output_path, fname=name)
 
     name = extract_dataset_name(input_path) if name is None else name
     name = name.replace("meta", "dino") if "meta" in name else f"dino_{name}"
@@ -437,11 +435,11 @@ def dino_eval(input_path, output_path, meta_path):
     df = format_mean_std(df, decimals=3)
     df = format_colnames(df)
 
-    save_latex_table(
-        df,
-        out_dir=output_path,
-        fname=name,
-    )
+    if output_path is not None:
+        output_path = Path(output_path).expanduser()
+        save_latex_table(df, out_dir=output_path, fname=name)
+
+    return df, name
 
 
 ####################################################################################################
@@ -467,11 +465,10 @@ def evaluation(input_path, output_path):
     """
 
     input_path = Path(input_path).expanduser()
-    output_path = Path(output_path).expanduser()
 
     model_name = input_path.parent.name
-    fname = f"eval-{model_name}"
-    fname = fname.replace("-", "_")
+    name = f"eval-{model_name}"
+    name = name.replace("-", "_")
     print(f"Model name: {model_name}")
 
     with open(input_path, "r") as f:
@@ -485,7 +482,87 @@ def evaluation(input_path, output_path):
     df = format_colnames(df)
 
     # Write into latex file.
-    save_latex_table(df, out_dir=output_path, fname=fname)
+    if output_path is not None:
+        output_path = Path(output_path).expanduser()
+        save_latex_table(df, out_dir=output_path, fname=name)
+
+    return df, name
+
+
+####################################################################################################
+# comparison
+####################################################################################################
+
+
+@main.command()
+@click.option(
+    "--gen-eval-path",
+    type=click.Path(exists=True),
+    help="Path to the evaluation file (JSONL format).",
+)
+@click.option(
+    "--clf-eval-path",
+    type=click.Path(exists=True),
+    help="Path to the evaluation file (JSONL format).",
+)
+@click.option(
+    "--meta-path",
+    type=click.Path(exists=True),
+    required=False,
+    help="Path to the original dataset to extract metadata with.",
+)
+@click.option(
+    "--output-path",
+    type=click.Path(exists=True),
+    default="./outputs/latex/",
+    help="Path to save the generated LaTeX tables.",
+)
+def comparison(gen_eval_path, clf_eval_path, meta_path, output_path):
+    """
+    Reads the evaluation file and returns a DataFrame.
+    """
+
+    gen_df, name = evaluation.callback(gen_eval_path, None)
+    clf_df, name = dino_eval.callback(clf_eval_path, None, meta_path)
+
+    # Filter gen_df
+    GEN_COLUMNS = [
+        "Num Features",
+        "P Inc",
+        "P Dino",
+    ]
+    gen_df = gen_df[[col for col in GEN_COLUMNS if col in gen_df.columns]]
+    gen_df.index = gen_df.index.astype(str)
+
+    # Filter clf_df
+    CLF_COLUMNS = ["Recall", "Labelset"]
+    clf_df = clf_df[[col for col in CLF_COLUMNS if col in clf_df.columns]]
+    clf_df.index = clf_df.index.astype(str)
+
+    # Merge the two dataframes on the index (class)
+    df = gen_df.merge(
+        clf_df,
+        left_index=True,
+        right_index=True,
+        how="outer",
+    )
+    df = pd.concat(
+        [
+            df.loc[["overall"]],
+            df.drop("overall").sort_index(key=lambda x: x.astype(int)),
+        ]
+    )
+
+    # Build fname
+    name = extract_dataset_name(clf_eval_path) if name is None else name
+    name = name.replace("dino", "comp") if "dino" in name else f"comp_{name}"
+
+    # Write into latex file.
+    if output_path is not None:
+        output_path = Path(output_path).expanduser()
+        save_latex_table(df, out_dir=output_path, fname=name)
+
+    return df, name
 
 
 if __name__ == "__main__":
