@@ -19,9 +19,26 @@ unzip img_align_celeba.zip
 
 or [download dataset](http://mmlab.ie.cuhk.edu.hk/projects/CelebA.html) by hand.
 
-## Multi-Label Classification with Label Powerset
+## Dataset Restructuring
 
-For a given selection of labels among all available lables, defining a label space $\mathcal{L}$, the original dataset is split into non-overlapping classes, or label combinations, corresponding to the labelsets in the powerset of $\mathcal{L}$. Each subset is stored in a separate folder containing all images corresponding to that specific Labelset.
+For easier analysis, we restructure the dataset based on a selected subset of attributes. This restructuring consists of redefining the label space according to the chosen attributes.
+We provide two alternative label transformation strategies:
+
+### Label Powerset Transformation
+
+Given a selection of labels from the available dataset attributes, we define a new label space $\mathcal{L}$.  
+The dataset is then partitioned into **non-overlapping classes**, where each class corresponds to a unique combination of labels from the powerset of $\mathcal{L}$.
+
+In other words, each distinct subset of selected labels defines a separate class, ensuring that each sample belongs to exactly one class.
+
+### Multi-Hot Encoding
+
+Alternatively, the selected labels can be encoded using **multi-hot encoding**.  
+In this representation, each sample is associated with a binary vector indicating the presence or absence of each selected label.
+
+This approach preserves the multi-label structure of the data instead of converting it into mutually exclusive classes.
+
+### Command
 
 ```bash
 uv run restructure_dataset.py \
