@@ -33,11 +33,17 @@ logger = logging.getLogger(__name__)
 # Accuracy computation
 
 
-def br_accuracy_computation(true, pred):
-    correct_per_class = ((pred == true).float()).sum(dim=0)  # [C]
-    total_per_class = true.shape[0]
-    accuracy_per_class = correct_per_class / total_per_class
-    return accuracy_per_class
+def br_accuracy_computation(true, pred, method=None):
+    if method is None:
+        return (pred == true).float().mean().item()
+    elif method == "subset":
+        return (pred == true).all(dim=1).float().mean().item()
+    elif method == "per_class":
+        return (((pred == true).float()).sum(dim=0) / true.shape[0]).tolist()
+    elif method == "hamming_loss":
+        return (pred != true).float().mean().item()
+    else:
+        raise ValueError(f"Unknown method: {method}")
 
 
 def lp_accuracy_computation(true, pred):
@@ -59,9 +65,9 @@ ACC_COMPUTATION = {
 @click.command()
 
 @click.option("--name",                 help="Experiment name",                            type=str, default="dino")
-@click.option("--method", "-m",         help="MLL method",                                 type=click.Choice(["br", "lp"]), required=True)
 @click.option("--data", "-d",           help="Path to the dataset", metavar="DIR|ZIP",     type=click.Path(exists=True), required=True)
 @click.option("--num-labels", "-nl",    help="Num labels in dataset (not labelsets)",      type=int, required=True,)
+@click.option("--method", "-mll",       help="MLL method",                                 type=click.Choice(["br", "lp"]), required=True)
 @click.option("--batch", "batch_size",  help="Batch size",                                 type=int, default=256, show_default=True)
 @click.option("--epochs", "num_epochs", help="Number of epochs for training",              type=int, default=10, show_default=True)
 @click.option("--seed",                 help="Seed for randomness",                        type=int, default=0, show_default=True)
@@ -69,7 +75,7 @@ ACC_COMPUTATION = {
 
 # fmt: on
 
-def main(name, method, data, num_labels, batch_size, num_epochs, seed, evaluate):
+def main(name, data, num_labels, method, batch_size, num_epochs, seed, evaluate):
     logger.info(f"{'EVALUATION' if evaluate else 'TRAINING'}")
 
     # Config
@@ -161,8 +167,9 @@ def main(name, method, data, num_labels, batch_size, num_epochs, seed, evaluate)
 
     if evaluate and ckpt_path.exists():
         ckpt = torch.load(ckpt_path, map_location=device)
-
+        
         model.module.load_state_dict(ckpt["model"])
+        monitor = ckpt["monitor"]
 
         logger.info(f"Evaluating checkpoint — epoch {monitor['epoch']} ")
 
@@ -251,11 +258,15 @@ def main(name, method, data, num_labels, batch_size, num_epochs, seed, evaluate)
                 val_loss += loss.item() * x.size(0)
 
                 preds = PRED_PROCESSING[method](outputs)
-                val_correct += (preds == y).sum().item()
+                val_correct += (preds == y).float().sum(dim=0)
 
                 val_batch_pbar.set_postfix({"Loss": loss.item()})
 
-        accuracy = val_correct / val_count
+        accuracy = (
+            (val_correct.mean(dim=0) / val_count).item()
+            if val_correct.size()
+            else (val_correct / val_count).item()
+        )
 
         monitor["val_loss"].append(val_loss / val_count)
         monitor["accuracy"].append(accuracy)

@@ -1,21 +1,15 @@
 import json
 import logging
-from collections import Counter
 from pathlib import Path
-from zipfile import ZipFile
 
 import click
-import pandas as pd
 import torch
-import torch.nn as nn
-from sklearn.metrics import precision_recall_fscore_support
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import AutoImageProcessor, AutoModelForImageClassification
 
 from datatools.multilabel import BATCH_PROCESSING, PRED_PROCESSING
-from datatools.utils import extract_dataset_name, make_json_serializable
-from evaluation.supervised import compute_multiclass_metrics, df_metrics_per_class
+from datatools.utils import make_json_serializable
+from evaluation.supervised import compute_multiclass_metrics, compute_multihot_metrics
 from training import dataset
 from training.classifier import prepare_dino_model
 
@@ -81,70 +75,52 @@ def map_labels(x: torch.Tensor, mapping: dict[int, int]) -> torch.Tensor:
     return y
 
 
+# ----------------------------------------------------------------------------------------------------
+
+DINO_METRICS_FNAME = "dino_metrics.jsonl"
+
 ####################################################################################################
 ####################################################################################################
 ####################################################################################################
 
+# fmt: off
 
 @click.command()
-@click.option(
-    "-d",
-    "--data",
-    "--data-path",
-    "data_path",
-    type=click.Path(exists=True),
-    metavar="DIR|ZIP",
-    help="Path to the dataset (directory or zip file).",
-)
-@click.option(
-    "--model",
-    "model_path",
-    type=click.Path(exists=True),
-    metavar="PATH",
-    help="Path to the model checkpoint.",
-)
-@click.option(
-    "--num-labels",
-    "num_labels",
-    type=int,
-    default=4,
-    help="Number of labels in the dataset.",
-)
-@click.option(
-    "--method",
-    type=click.Choice(["br", "lp"]),
-    default="lp",
-    help="Method used for fine-tuning the DINOv2 model (Binary Relevance or Label Powerset).",
-)
-@click.option(
-    "--batch",
-    "batch_size",
-    type=int,
-    default=256,
-    help="Batch size for prediction.",
-)
-@click.option(
-    "--output-path",
-    type=click.Path(exists=True),
-    required=False,
-    help="Path to the evaluation file (JSONL format).",
-)
-def main(data_path, model_path, num_labels, method, batch_size, output_path):
+
+@click.option("--data", "-d",          help="Path to the dataset", metavar="DIR|ZIP",          type=click.Path(exists=True), required=True)
+@click.option("--num-labels", "-nl",   help="Num labels in dataset (not labelsets)",           type=int, required=True,)
+@click.option("--method", "-mll",      help="MLL method",                                      type=click.Choice(["br", "lp"]), required=True)
+@click.option("--model", "-m",         help="Path to the model checkpoint.", metavar="PTH",    type=click.Path(exists=True), required=True)
+@click.option("--batch", "batch_size", help="Batch size",                                      type=int, default=256, show_default=True)
+@click.option("--out", "-o",           help="Path for saving evaluation", metavar="DIR|JSONL", type=click.Path(exists=True), required=False)
+
+# fmt: on
+
+def main(data, num_labels, method, model, batch_size, out):
     """Evaluate Fine-tuned DINOv2 model on generated images and compute metrics"""
 
     # Config
 
-    data_path = Path(data_path).expanduser()
-    model_path = Path(model_path).expanduser()
-    if output_path is None:
-        output_path = data_path.parent
-    output_path = Path(output_path).expanduser()
-
+    data_path = Path(data).expanduser()
+    model_path = Path(model).expanduser()
     assert data_path.exists(), f"Data path {data_path} does not exist."
     assert model_path.exists(), f"Model path {model_path} does not exist."
-    output_path.mkdir(parents=True, exist_ok=True)
 
+    if out is None: 
+        output_path = data_path.parent / DINO_METRICS_FNAME
+    else :
+        output_path = Path(out).expanduser()
+    if output_path.is_dir():
+        output_path.mkdir(parents=True, exist_ok=True)
+        output_path = output_path / DINO_METRICS_FNAME
+    elif output_path.suffix and output_path.suffix == ".jsonl":
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        raise ValueError(f"Invalid output path: {out}")
+    
+    logger.info(f"Data path: {data_path}")
     logger.info(f"Model path: {model_path}")
+    logger.info(f"Output path: {output_path}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -228,16 +204,17 @@ def main(data_path, model_path, num_labels, method, batch_size, output_path):
     # ----------------------------------------------------------------------------------------------------
     logger.info("Metrics")
 
-    metrics = compute_multiclass_metrics(
+    metrics = {"br": compute_multihot_metrics, "lp": compute_multiclass_metrics}[method](
         true_label_tensor.detach().cpu().numpy(),
         pred_label_tensor.detach().cpu().numpy(),
         num_classes=num_labels,
     )
-    # metrics["attrs"] = [v for v in id2labelset.values()]
 
     logger.info(f"Accuracy: {metrics['accuracy']}")
+    
+    
 
-    with open(output_path / "dino_metrics.jsonl", "w") as file:
+    with open(output_path, "w") as file:
         json.dump(make_json_serializable(metrics), file, indent=4)
 
     # metrics_df = pd.DataFrame([metrics])
