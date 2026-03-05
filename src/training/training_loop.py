@@ -67,9 +67,13 @@ def training_loop(
 
     # Load dataset.
     dist.print0("Loading dataset...")
+
     dataset_obj = dnnlib.util.construct_class_by_name(
         **dataset_kwargs
     )  # subclass of training.dataset.Dataset
+
+    dist.print0(f"\tlabel_dim: {dataset_obj.label_dim}")
+
     dataset_sampler = misc.InfiniteSampler(
         dataset=dataset_obj,
         rank=dist.get_rank(),
@@ -87,6 +91,9 @@ def training_loop(
 
     # Construct network.
     dist.print0("Constructing network...")
+
+    dist.print0(f"\tcond: {network_kwargs.get('cond', False)}")
+
     interface_kwargs = dict(
         img_resolution=dataset_obj.resolution,
         img_channels=dataset_obj.num_channels,
@@ -95,6 +102,9 @@ def training_loop(
     net = dnnlib.util.construct_class_by_name(
         **network_kwargs, **interface_kwargs
     )  # subclass of torch.nn.Module
+
+    dist.print0(f"\tlabel_dim: {net.label_dim}")
+
     net.train().requires_grad_(True).to(device)
     # if dist.get_rank() == 0:
     #     with torch.no_grad():

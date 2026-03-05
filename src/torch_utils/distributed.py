@@ -6,6 +6,7 @@
 # work. If not, see http://creativecommons.org/licenses/by-nc-sa/4.0/
 
 import os
+import socket
 
 import idr_torch
 import torch
@@ -36,6 +37,24 @@ def init():
     # backend = 'gloo' if os.name == 'nt' else 'nccl'
     # print(backend)
     # torch.distributed.init_process_group(backend=backend, init_method='env://')
+
+    # personal addendum
+    print(
+        "host",
+        socket.gethostname(),
+        "rank",
+        idr_torch.rank,
+        "local_rank",
+        idr_torch.local_rank,
+        "world_size",
+        idr_torch.size,
+        "CUDA_VISIBLE_DEVICES",
+        os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "device_count",
+        torch.cuda.device_count(),
+        flush=True,
+    )
+
     torch.cuda.set_device(idr_torch.local_rank)
     sync_device = torch.device("cuda") if get_world_size() > 1 else None
     training_stats.init_multiprocessing(rank=get_rank(), sync_device=sync_device)

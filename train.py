@@ -138,6 +138,8 @@ def main(**kwargs):
         raise click.ClickException(f"--data: {err}")
 
     # Network architecture.
+    c.network_kwargs.cond = opts.cond
+
     if opts.arch == "ddpmpp":
         c.network_kwargs.update(
             model_type="SongUNet",
