@@ -60,138 +60,33 @@ def parse_float_list(s):
 
 # ----------------------------------------------------------------------------
 
+# fmt: off
 
 @click.command()
-@click.option(
-    "--network",
-    "network_pkl",
-    help="Network pickle filename",
-    metavar="PATH|URL",
-    type=str,
-    required=True,
-)
-@click.option(
-    "--outdir",
-    help="Where to save the output images",
-    metavar="DIR",
-    type=str,
-)
-@click.option(
-    "--num-samples",
-    help="Number of samples",
-    metavar="INT",
-    type=click.IntRange(min=0),
-    default=50000,
-    show_default=True,
-)
-@click.option(
-    "--subdirs",
-    help="Create subdirectory for every 1000 samples",
-    default=True,
-    is_flag=True,
-)
-@click.option(
-    "--class",
-    "class_idx",
-    help="Class label  [default: random]",
-    metavar="INT",
-    type=click.IntRange(min=0),
-    default=None,
-)
-@click.option(
-    "--batch",
-    "max_batch_size",
-    help="Maximum batch size",
-    metavar="INT",
-    type=click.IntRange(min=1),
-    default=128,
-    show_default=True,
-)
-@click.option(
-    "--target-prior",
-    "target_prior_str",
-    help="Target class prior as '20-80' or '30-10-60' (will be renormalized).",
-    type=str,
-    default=None,
-)
-@click.option(
-    "--no_zip", help="Compress the output directory", default=False, is_flag=True
-)
-@click.option(
-    "--steps",
-    "num_steps",
-    help="Number of sampling steps",
-    metavar="INT",
-    type=click.IntRange(min=1),
-    default=18,
-    show_default=True,
-)
-@click.option(
-    "--sigma_min",
-    help="Lowest noise level  [default: varies]",
-    metavar="FLOAT",
-    type=click.FloatRange(min=0.01, min_open=True),
-)
-@click.option(
-    "--sigma_max",
-    help="Highest noise level  [default: varies]",
-    metavar="FLOAT",
-    type=click.FloatRange(min=0, min_open=True),
-)
-@click.option(
-    "--rho",
-    help="Time step exponent",
-    metavar="FLOAT",
-    type=click.FloatRange(min=0, min_open=True),
-    default=7,
-    show_default=True,
-)
-@click.option(
-    "--S_churn",
-    "S_churn",
-    help="Stochasticity strength",
-    metavar="FLOAT",
-    type=click.FloatRange(min=0),
-    default=0,
-    show_default=True,
-)
-@click.option(
-    "--S_min",
-    "S_min",
-    help="Stoch. min noise level",
-    metavar="FLOAT",
-    type=click.FloatRange(min=0),
-    default=0,
-    show_default=True,
-)
-@click.option(
-    "--S_max",
-    "S_max",
-    help="Stoch. max noise level",
-    metavar="FLOAT",
-    type=click.FloatRange(min=0),
-    default="inf",
-    show_default=True,
-)
-@click.option(
-    "--S_noise",
-    "S_noise",
-    help="Stoch. noise inflation",
-    metavar="FLOAT",
-    type=float,
-    default=1,
-    show_default=True,
-)
-# --- Minimum per-class option ---
-@click.option(
-    "--min-per-class",
-    "min_per_class",
-    help="Ensure at least this many samples per class across all ranks (0 to disable)",
-    metavar="INT",
-    type=click.IntRange(min=0),
-    default=20000,
-    show_default=True,
-)
+
+@click.option("--network", "network_pkl",           help="Network pickle filename", metavar="PATH|URL",                         type=str, required=True)
+# Storage options
+@click.option("--outdir",                           help="Where to save the output images", metavar="DIR",                      type=str)
+@click.option("--subdirs",                          help="Create subdirectory for every 1000 samples",                          is_flag=True, default=True)
+@click.option("--no-zip",                           help="Compress the output directory",                                       is_flag=True, default=False)
+# Number of sample and distribution
+@click.option("--num-samples",                      help="Number of samples", metavar="INT",                                    type=click.IntRange(min=0), default=50000, show_default=True)
+@click.option("--min-per-class", "min_per_class",   help="Ensure at least samples per class across all ranks", metavar="INT",   type=click.IntRange(min=0), default=20000, show_default=True)
+@click.option("--target-prior", "target_prior_str", help="Target class prior as '20-80' or '30-10-60' (will be renormalized).", type=str, default=None)
+@click.option("--class", "class_idx",               help="Class label  [default: random]", metavar="INT",                       type=click.IntRange(min=0), default=None)
+# Sampler options
+@click.option("--steps", "num_steps",               help="Number of sampling steps", metavar="INT",                             type=click.IntRange(min=1), default=18, show_default=True)
+@click.option("--sigma_min",                        help="Lowest noise level  [default: varies]", metavar="FLOAT",              type=click.FloatRange(min=0.01, min_open=True))
+@click.option("--sigma_max",                        help="Highest noise level  [default: varies]", metavar="FLOAT",             type=click.FloatRange(min=0, min_open=True))
+@click.option("--rho",                              help="Time step exponent", metavar="FLOAT",                                 type=click.FloatRange(min=0, min_open=True), default=7, show_default=True)
+@click.option("--S_churn", "S_churn",               help="Stochasticity strength", metavar="FLOAT",                             type=click.FloatRange(min=0), default=0, show_default=True)
+@click.option("--S_min", "S_min",                   help="Stoch. min noise level", metavar="FLOAT",                             type=click.FloatRange(min=0), default=0, show_default=True)
+@click.option("--S_max", "S_max",                   help="Stoch. max noise level", metavar="FLOAT",                             type=click.FloatRange(min=0), default="inf", show_default=True)
+@click.option("--S_noise", "S_noise",               help="Stoch. noise inflation", metavar="FLOAT",                             type=float, default=1, show_default=True)
+@click.option("--batch", "max_batch_size",          help="Maximum batch size", metavar="INT",                                   type=click.IntRange(min=1), default=128, show_default=True)
+
+# fmt: on
+
 def main(
     network_pkl,
     outdir,
@@ -227,6 +122,8 @@ def main(
     with dnnlib.util.open_url(network_pkl, verbose=(dist.get_rank() == 0)) as f:
         net = pickle.load(f)["ema"].to(device)
 
+    # Load classifier for labeling generated images (for unconditional models or when label_dim == 0).
+    # FIX: make optional
     classifer_kwargs = dnnlib.EasyDict(
         class_name="training.classifier.Classifier", url=network_pkl
     )
@@ -425,6 +322,7 @@ def main(
                     )
                     class_labels = torch.eye(net.label_dim, device=device)[idx]
                 else:
+                    # FIX: update for multihot (currently assumes single-label even for conditional models)
                     class_labels = torch.eye(net.label_dim, device=device)[
                         rnd.randint(net.label_dim, size=[max_batch_size], device=device)
                     ]
@@ -526,6 +424,11 @@ def main(
             and class_labels.numel() > 0
             and gen_per_class.numel() > 0
         ):
+            # FIX
+            print(f"[Rank] {dist.get_rank()}")
+            print(f"Update per class counts: {class_labels.numel()} labels, gen_per_class has {gen_per_class.numel()} classes")
+            print(f"gen_per_class before update: {gen_per_class.tolist()}")
+
             lbl = torch.as_tensor(
                 class_labels.view(-1), device=device, dtype=torch.long
             )
