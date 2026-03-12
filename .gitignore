@@ -7,6 +7,7 @@ models/*
 notebooks/*
 scripts/*
 outputs/*
+out*/
 *.log
 
 # Python-generated files

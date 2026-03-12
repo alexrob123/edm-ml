@@ -24,7 +24,7 @@ def extract_dataset_name(path):
         raise ValueError(f"Unsupported data path: {path}")
 
     # return name.replace("-", "_")
-    return name
+    return name.lower()
 
 
 def zip_meta(path, fname="dataset.json"):

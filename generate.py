@@ -8,292 +8,23 @@
 """Generate random images using the techniques described in the paper
 "Elucidating the Design Space of Diffusion-Based Generative Models"."""
 
+import io
+import json
+import math
 import os
 import pickle
 import re
+import time
+import zipfile
 
 import click
 import numpy as np
 import PIL.Image
 import torch
-import tqdm
 
 import dnnlib
 from torch_utils import distributed as dist
-
-# ----------------------------------------------------------------------------
-# Proposed EDM sampler (Algorithm 2).
-
-
-def edm_sampler(
-    net,
-    latents,
-    class_labels=None,
-    randn_like=torch.randn_like,
-    num_steps=18,
-    sigma_min=0.002,
-    sigma_max=80,
-    rho=7,
-    S_churn=0,
-    S_min=0,
-    S_max=float("inf"),
-    S_noise=1,
-):
-    # Adjust noise levels based on what's supported by the network.
-    sigma_min = max(sigma_min, net.sigma_min)
-    sigma_max = min(sigma_max, net.sigma_max)
-
-    # Time step discretization.
-    step_indices = torch.arange(num_steps, dtype=torch.float64, device=latents.device)
-    t_steps = (
-        sigma_max ** (1 / rho)
-        + step_indices
-        / (num_steps - 1)
-        * (sigma_min ** (1 / rho) - sigma_max ** (1 / rho))
-    ) ** rho
-    t_steps = torch.cat(
-        [net.round_sigma(t_steps), torch.zeros_like(t_steps[:1])]
-    )  # t_N = 0
-
-    # Main sampling loop.
-    x_next = latents.to(torch.float64) * t_steps[0]
-    for i, (t_cur, t_next) in enumerate(zip(t_steps[:-1], t_steps[1:])):  # 0, ..., N-1
-        x_cur = x_next
-
-        # Increase noise temporarily.
-        gamma = (
-            min(S_churn / num_steps, np.sqrt(2) - 1) if S_min <= t_cur <= S_max else 0
-        )
-        t_hat = net.round_sigma(t_cur + gamma * t_cur)
-        x_hat = x_cur + (t_hat**2 - t_cur**2).sqrt() * S_noise * randn_like(x_cur)
-
-        # Euler step.
-        denoised = net(x_hat, t_hat, class_labels).to(torch.float64)
-        d_cur = (x_hat - denoised) / t_hat
-        x_next = x_hat + (t_next - t_hat) * d_cur
-
-        # Apply 2nd order correction.
-        if i < num_steps - 1:
-            denoised = net(x_next, t_next, class_labels).to(torch.float64)
-            d_prime = (x_next - denoised) / t_next
-            x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
-
-    return x_next
-
-
-# ----------------------------------------------------------------------------
-# Generalized ablation sampler, representing the superset of all sampling
-# methods discussed in the paper.
-
-
-def ablation_sampler(
-    net,
-    latents,
-    class_labels=None,
-    randn_like=torch.randn_like,
-    num_steps=18,
-    sigma_min=None,
-    sigma_max=None,
-    rho=7,
-    solver="heun",
-    discretization="edm",
-    schedule="linear",
-    scaling="none",
-    epsilon_s=1e-3,
-    C_1=0.001,
-    C_2=0.008,
-    M=1000,
-    alpha=1,
-    S_churn=0,
-    S_min=0,
-    S_max=float("inf"),
-    S_noise=1,
-):
-    assert solver in ["euler", "heun"]
-    assert discretization in ["vp", "ve", "iddpm", "edm"]
-    assert schedule in ["vp", "ve", "linear"]
-    assert scaling in ["vp", "none"]
-
-    # Helper functions for VP & VE noise level schedules.
-    vp_sigma = (
-        lambda beta_d, beta_min: lambda t: (
-            np.e ** (0.5 * beta_d * (t**2) + beta_min * t) - 1
-        )
-        ** 0.5
-    )
-    vp_sigma_deriv = (
-        lambda beta_d, beta_min: lambda t: 0.5
-        * (beta_min + beta_d * t)
-        * (sigma(t) + 1 / sigma(t))
-    )
-    vp_sigma_inv = (
-        lambda beta_d, beta_min: lambda sigma: (
-            (beta_min**2 + 2 * beta_d * (sigma**2 + 1).log()).sqrt() - beta_min
-        )
-        / beta_d
-    )
-    ve_sigma = lambda t: t.sqrt()
-    ve_sigma_deriv = lambda t: 0.5 / t.sqrt()
-    ve_sigma_inv = lambda sigma: sigma**2
-
-    # Select default noise level range based on the specified time step discretization.
-    if sigma_min is None:
-        vp_def = vp_sigma(beta_d=19.9, beta_min=0.1)(t=epsilon_s)
-        sigma_min = {"vp": vp_def, "ve": 0.02, "iddpm": 0.002, "edm": 0.002}[
-            discretization
-        ]
-    if sigma_max is None:
-        vp_def = vp_sigma(beta_d=19.9, beta_min=0.1)(t=1)
-        sigma_max = {"vp": vp_def, "ve": 100, "iddpm": 81, "edm": 80}[discretization]
-
-    # Adjust noise levels based on what's supported by the network.
-    sigma_min = max(sigma_min, net.sigma_min)
-    sigma_max = min(sigma_max, net.sigma_max)
-
-    # Compute corresponding betas for VP.
-    vp_beta_d = (
-        2
-        * (np.log(sigma_min**2 + 1) / epsilon_s - np.log(sigma_max**2 + 1))
-        / (epsilon_s - 1)
-    )
-    vp_beta_min = np.log(sigma_max**2 + 1) - 0.5 * vp_beta_d
-
-    # Define time steps in terms of noise level.
-    step_indices = torch.arange(num_steps, dtype=torch.float64, device=latents.device)
-    if discretization == "vp":
-        orig_t_steps = 1 + step_indices / (num_steps - 1) * (epsilon_s - 1)
-        sigma_steps = vp_sigma(vp_beta_d, vp_beta_min)(orig_t_steps)
-    elif discretization == "ve":
-        orig_t_steps = (sigma_max**2) * (
-            (sigma_min**2 / sigma_max**2) ** (step_indices / (num_steps - 1))
-        )
-        sigma_steps = ve_sigma(orig_t_steps)
-    elif discretization == "iddpm":
-        u = torch.zeros(M + 1, dtype=torch.float64, device=latents.device)
-        alpha_bar = lambda j: (0.5 * np.pi * j / M / (C_2 + 1)).sin() ** 2
-        for j in torch.arange(M, 0, -1, device=latents.device):  # M, ..., 1
-            u[j - 1] = (
-                (u[j] ** 2 + 1) / (alpha_bar(j - 1) / alpha_bar(j)).clip(min=C_1) - 1
-            ).sqrt()
-        u_filtered = u[torch.logical_and(u >= sigma_min, u <= sigma_max)]
-        sigma_steps = u_filtered[
-            ((len(u_filtered) - 1) / (num_steps - 1) * step_indices)
-            .round()
-            .to(torch.int64)
-        ]
-    else:
-        assert discretization == "edm"
-        sigma_steps = (
-            sigma_max ** (1 / rho)
-            + step_indices
-            / (num_steps - 1)
-            * (sigma_min ** (1 / rho) - sigma_max ** (1 / rho))
-        ) ** rho
-
-    # Define noise level schedule.
-    if schedule == "vp":
-        sigma = vp_sigma(vp_beta_d, vp_beta_min)
-        sigma_deriv = vp_sigma_deriv(vp_beta_d, vp_beta_min)
-        sigma_inv = vp_sigma_inv(vp_beta_d, vp_beta_min)
-    elif schedule == "ve":
-        sigma = ve_sigma
-        sigma_deriv = ve_sigma_deriv
-        sigma_inv = ve_sigma_inv
-    else:
-        assert schedule == "linear"
-        sigma = lambda t: t
-        sigma_deriv = lambda t: 1
-        sigma_inv = lambda sigma: sigma
-
-    # Define scaling schedule.
-    if scaling == "vp":
-        s = lambda t: 1 / (1 + sigma(t) ** 2).sqrt()
-        s_deriv = lambda t: -sigma(t) * sigma_deriv(t) * (s(t) ** 3)
-    else:
-        assert scaling == "none"
-        s = lambda t: 1
-        s_deriv = lambda t: 0
-
-    # Compute final time steps based on the corresponding noise levels.
-    t_steps = sigma_inv(net.round_sigma(sigma_steps))
-    t_steps = torch.cat([t_steps, torch.zeros_like(t_steps[:1])])  # t_N = 0
-
-    # Main sampling loop.
-    t_next = t_steps[0]
-    x_next = latents.to(torch.float64) * (sigma(t_next) * s(t_next))
-    for i, (t_cur, t_next) in enumerate(zip(t_steps[:-1], t_steps[1:])):  # 0, ..., N-1
-        x_cur = x_next
-
-        # Increase noise temporarily.
-        gamma = (
-            min(S_churn / num_steps, np.sqrt(2) - 1)
-            if S_min <= sigma(t_cur) <= S_max
-            else 0
-        )
-        t_hat = sigma_inv(net.round_sigma(sigma(t_cur) + gamma * sigma(t_cur)))
-        x_hat = s(t_hat) / s(t_cur) * x_cur + (
-            sigma(t_hat) ** 2 - sigma(t_cur) ** 2
-        ).clip(min=0).sqrt() * s(t_hat) * S_noise * randn_like(x_cur)
-
-        # Euler step.
-        h = t_next - t_hat
-        denoised = net(x_hat / s(t_hat), sigma(t_hat), class_labels).to(torch.float64)
-        d_cur = (
-            sigma_deriv(t_hat) / sigma(t_hat) + s_deriv(t_hat) / s(t_hat)
-        ) * x_hat - sigma_deriv(t_hat) * s(t_hat) / sigma(t_hat) * denoised
-        x_prime = x_hat + alpha * h * d_cur
-        t_prime = t_hat + alpha * h
-
-        # Apply 2nd order correction.
-        if solver == "euler" or i == num_steps - 1:
-            x_next = x_hat + h * d_cur
-        else:
-            assert solver == "heun"
-            denoised = net(x_prime / s(t_prime), sigma(t_prime), class_labels).to(
-                torch.float64
-            )
-            d_prime = (
-                sigma_deriv(t_prime) / sigma(t_prime) + s_deriv(t_prime) / s(t_prime)
-            ) * x_prime - sigma_deriv(t_prime) * s(t_prime) / sigma(t_prime) * denoised
-            x_next = x_hat + h * (
-                (1 - 1 / (2 * alpha)) * d_cur + 1 / (2 * alpha) * d_prime
-            )
-
-    return x_next
-
-
-# ----------------------------------------------------------------------------
-# Wrapper for torch.Generator that allows specifying a different random seed
-# for each sample in a minibatch.
-
-
-class StackedRandomGenerator:
-    def __init__(self, device, seeds):
-        super().__init__()
-        self.generators = [
-            torch.Generator(device).manual_seed(int(seed) % (1 << 32)) for seed in seeds
-        ]
-
-    def randn(self, size, **kwargs):
-        assert size[0] == len(self.generators)
-        return torch.stack(
-            [torch.randn(size[1:], generator=gen, **kwargs) for gen in self.generators]
-        )
-
-    def randn_like(self, input):
-        return self.randn(
-            input.shape, dtype=input.dtype, layout=input.layout, device=input.device
-        )
-
-    def randint(self, *args, size, **kwargs):
-        assert size[0] == len(self.generators)
-        return torch.stack(
-            [
-                torch.randint(*args, size=size[1:], generator=gen, **kwargs)
-                for gen in self.generators
-            ]
-        )
-
+from training.generator import StackedRandomGenerator, edm_sampler, seed_batch
 
 # ----------------------------------------------------------------------------
 # Parse a comma separated list of numbers or ranges and return a list of ints.
@@ -314,151 +45,59 @@ def parse_int_list(s):
     return ranges
 
 
+# Parse a hyphen- or comma-separated list of floats like '20-80' or '30,10,60'.
+# Returns a list of floats.
+
+
+def parse_float_list(s):
+    if s is None:
+        return None
+    if isinstance(s, (list, tuple, np.ndarray)):
+        return [float(x) for x in s]
+    parts = re.split(r"[-,]", s.strip())
+    return [float(p) for p in parts if p != ""]
+
+
 # ----------------------------------------------------------------------------
 
 
+# fmt: off
 @click.command()
-@click.option(
-    "--network",
-    "network_pkl",
-    help="Network pickle filename",
-    metavar="PATH|URL",
-    type=str,
-    required=True,
-)
-@click.option(
-    "--outdir",
-    help="Where to save the output images",
-    metavar="DIR",
-    type=str,
-    required=True,
-)
-@click.option(
-    "--seeds",
-    help="Random seeds (e.g. 1,2,5-10)",
-    metavar="LIST",
-    type=parse_int_list,
-    default="0-63",
-    show_default=True,
-)
-@click.option(
-    "--subdirs", help="Create subdirectory for every 1000 seeds", is_flag=True
-)
-@click.option(
-    "--class",
-    "class_idx",
-    help="Class label  [default: random]",
-    metavar="INT",
-    type=click.IntRange(min=0),
-    default=None,
-)
-@click.option(
-    "--batch",
-    "max_batch_size",
-    help="Maximum batch size",
-    metavar="INT",
-    type=click.IntRange(min=1),
-    default=64,
-    show_default=True,
-)
-@click.option(
-    "--steps",
-    "num_steps",
-    help="Number of sampling steps",
-    metavar="INT",
-    type=click.IntRange(min=1),
-    default=18,
-    show_default=True,
-)
-@click.option(
-    "--sigma_min",
-    help="Lowest noise level  [default: varies]",
-    metavar="FLOAT",
-    type=click.FloatRange(min=0, min_open=True),
-)
-@click.option(
-    "--sigma_max",
-    help="Highest noise level  [default: varies]",
-    metavar="FLOAT",
-    type=click.FloatRange(min=0, min_open=True),
-)
-@click.option(
-    "--rho",
-    help="Time step exponent",
-    metavar="FLOAT",
-    type=click.FloatRange(min=0, min_open=True),
-    default=7,
-    show_default=True,
-)
-@click.option(
-    "--S_churn",
-    "S_churn",
-    help="Stochasticity strength",
-    metavar="FLOAT",
-    type=click.FloatRange(min=0),
-    default=0,
-    show_default=True,
-)
-@click.option(
-    "--S_min",
-    "S_min",
-    help="Stoch. min noise level",
-    metavar="FLOAT",
-    type=click.FloatRange(min=0),
-    default=0,
-    show_default=True,
-)
-@click.option(
-    "--S_max",
-    "S_max",
-    help="Stoch. max noise level",
-    metavar="FLOAT",
-    type=click.FloatRange(min=0),
-    default="inf",
-    show_default=True,
-)
-@click.option(
-    "--S_noise",
-    "S_noise",
-    help="Stoch. noise inflation",
-    metavar="FLOAT",
-    type=float,
-    default=1,
-    show_default=True,
-)
-@click.option(
-    "--solver",
-    help="Ablate ODE solver",
-    metavar="euler|heun",
-    type=click.Choice(["euler", "heun"]),
-)
-@click.option(
-    "--disc",
-    "discretization",
-    help="Ablate time step discretization {t_i}",
-    metavar="vp|ve|iddpm|edm",
-    type=click.Choice(["vp", "ve", "iddpm", "edm"]),
-)
-@click.option(
-    "--schedule",
-    help="Ablate noise schedule sigma(t)",
-    metavar="vp|ve|linear",
-    type=click.Choice(["vp", "ve", "linear"]),
-)
-@click.option(
-    "--scaling",
-    help="Ablate signal scaling s(t)",
-    metavar="vp|none",
-    type=click.Choice(["vp", "none"]),
-)
+@click.option("--network", "network_pkl",           help="Network pickle filename", metavar="PATH|URL",                         type=str, required=True)
+# Storage options
+@click.option("--outdir",                           help="Where to save the output images", metavar="DIR",                      type=str)
+@click.option("--subdirs",                          help="Create subdirectory for every 1000 samples",                          is_flag=True, default=True)
+@click.option("--no-zip",                           help="Compress the output directory",                                       is_flag=True, default=False)
+# Number of sample and distribution
+@click.option("--num-samples",                      help="Number of samples", metavar="INT",                                    type=click.IntRange(min=0), default=50000, show_default=True)
+@click.option("--min-per-class", "min_per_class",   help="Ensure at least samples per class across all ranks", metavar="INT",   type=click.IntRange(min=0), default=20000, show_default=True)
+@click.option("--target-prior", "target_prior_str", help="Target class prior as '20-80' or '30-10-60' (will be renormalized).", type=str, default=None)
+@click.option("--class", "class_idx",               help="Class label  [default: random]", metavar="INT",                       type=click.IntRange(min=0), default=None)
+# Sampler options
+@click.option("--steps", "num_steps",               help="Number of sampling steps", metavar="INT",                             type=click.IntRange(min=1), default=18, show_default=True)
+@click.option("--sigma_min",                        help="Lowest noise level  [default: varies]", metavar="FLOAT",              type=click.FloatRange(min=0.01, min_open=True))
+@click.option("--sigma_max",                        help="Highest noise level  [default: varies]", metavar="FLOAT",             type=click.FloatRange(min=0, min_open=True))
+@click.option("--rho",                              help="Time step exponent", metavar="FLOAT",                                 type=click.FloatRange(min=0, min_open=True), default=7, show_default=True)
+@click.option("--S_churn", "S_churn",               help="Stochasticity strength", metavar="FLOAT",                             type=click.FloatRange(min=0), default=0, show_default=True)
+@click.option("--S_min", "S_min",                   help="Stoch. min noise level", metavar="FLOAT",                             type=click.FloatRange(min=0), default=0, show_default=True)
+@click.option("--S_max", "S_max",                   help="Stoch. max noise level", metavar="FLOAT",                             type=click.FloatRange(min=0), default="inf", show_default=True)
+@click.option("--S_noise", "S_noise",               help="Stoch. noise inflation", metavar="FLOAT",                             type=float, default=1, show_default=True)
+@click.option("--batch", "max_batch_size",          help="Maximum batch size", metavar="INT",                                   type=click.IntRange(min=1), default=128, show_default=True)
+@click.option("--clf-uncond",                       help="Infer class labels from classifier for unconditional generation",     is_flag=True, default=False)
+# fmt: on
+
 def main(
     network_pkl,
     outdir,
     subdirs,
-    seeds,
+    num_samples,
     class_idx,
     max_batch_size,
+    target_prior_str,
+    min_per_class,
     device=torch.device("cuda"),
+    no_zip=False,
+    clf_uncond=False,
     **sampler_kwargs,
 ):
     """Generate random images using the techniques described in the paper
@@ -466,59 +105,244 @@ def main(
 
     Examples:
 
-    \b
-    # Generate 64 images and save them as out/*.png
-    python generate.py --outdir=out --seeds=0-63 --batch=64 \\
-        --network=https://nvlabs-fi-cdn.nvidia.com/edm/pretrained/edm-cifar10-32x32-cond-vp.pkl
-
-    \b
-    # Generate 1024 images using 2 GPUs
-    torchrun --standalone --nproc_per_node=2 generate.py --outdir=out --seeds=0-999 --batch=64 \\
-        --network=https://nvlabs-fi-cdn.nvidia.com/edm/pretrained/edm-cifar10-32x32-cond-vp.pkl
+    # Generate 50k images using 2 GPUs using model $model
+    torchrun --standalone --nproc_per_node=2  generate.py --num_samples=50000 \\
+                --network=training-runs/$model --subdirs --w_boost 1.0
     """
     dist.init()
-    num_batches = (
-        (len(seeds) - 1) // (max_batch_size * dist.get_world_size()) + 1
-    ) * dist.get_world_size()
-    all_batches = torch.as_tensor(seeds).tensor_split(num_batches)
-    rank_batches = all_batches[dist.get_rank() :: dist.get_world_size()]
+    world_size = dist.get_world_size()
+    rank = dist.get_rank()
 
     # Rank 0 goes first.
     if dist.get_rank() != 0:
         torch.distributed.barrier()
 
+    # Show parameters
+    dist.print0("Generating with the following constraints:")
+    dist.print0(f"  num_samples: {num_samples}")
+    dist.print0(f"  class_idx: {class_idx}")
+    dist.print0(f"  target_prior: {target_prior_str}")
+    dist.print0(f"  min_per_class: {min_per_class}")
+
+    dist.print0("Saving samples with the following constraints:")
+    dist.print0(f"  subdirs: {subdirs}")
+    dist.print0(f"  no_zip: {no_zip}")
+
     # Load network.
     dist.print0(f'Loading network from "{network_pkl}"...')
     with dnnlib.util.open_url(network_pkl, verbose=(dist.get_rank() == 0)) as f:
         net = pickle.load(f)["ema"].to(device)
-    dist.print0(f"Network label dim: {net.label_dim}")
+
+    # Load classifier for labeling generated images (for unconditional models or when label_dim == 0).
+    if clf_uncond:
+        classifer_kwargs = dnnlib.EasyDict(
+            class_name="training.classifier.Classifier", url=network_pkl
+        )
+        classif = dnnlib.util.construct_class_by_name(**classifer_kwargs).to(device)
 
     # Other ranks follow.
     if dist.get_rank() == 0:
         torch.distributed.barrier()
 
-    # Loop over batches.
-    dist.print0(f'Generating {len(seeds)} images to "{outdir}"...')
-    for batch_seeds in tqdm.tqdm(
-        rank_batches, unit="batch", disable=(dist.get_rank() != 0)
-    ):
-        torch.distributed.barrier()
-        batch_size = len(batch_seeds)
-        if batch_size == 0:
-            continue
+    # --- Determine if the model is conditional or unconditional ---
+    model_name = os.path.basename(network_pkl)
+    name_cond = "-cond-" in model_name
+    name_uncond = "-uncond-" in model_name
+    if name_cond != name_uncond:
+        is_cond_model = name_cond
+    else:
+        # Fallback to architecture attribute
+        is_cond_model = bool(getattr(net, "label_dim", 0))
+    dist.print0(
+        f"Model type detected: {'cond' if is_cond_model else 'uncond'}"
+        f" (from '{model_name}')"
+    )
 
-        # Pick latents and labels.
+    # --- Rejection sampling setup (optional) ---
+    target_prior = None
+    if target_prior_str is not None:
+        tp = torch.tensor(
+            parse_float_list(target_prior_str), device=device, dtype=torch.float32
+        )
+        if (tp <= 0).any():
+            raise click.ClickException("All target-prior entries must be positive.")
+        target_prior = tp / tp.sum()
+        dist.print0(f"Using target prior (normalized): {target_prior.tolist()}")
+        # For conditional models, ensure prior length matches label_dim
+        if (
+            "is_cond_model" in locals()
+            and is_cond_model
+            and int(getattr(net, "label_dim", 0)) > 0
+        ):
+            if target_prior.numel() != int(net.label_dim):
+                raise click.ClickException(
+                    f"Target prior length ({target_prior.numel()}) must equal model label_dim ({int(net.label_dim)})."
+                )
+
+    def can_end(
+        num_samples, min_per_class, gen_per_class, total_generated, target_prior
+    ):
+        ws = world_size
+        # Per-rank targets
+        per_rank_total = (int(num_samples) + ws - 1) // ws
+        per_rank_min = (
+            (int(min_per_class) + ws - 1) // ws if int(min_per_class) > 0 else 0
+        )
+
+        # If no prior: stop when per-rank total reached and per-class minimums met
+        if target_prior is None:
+            cond_total = total_generated >= per_rank_total
+            cond_min = True
+            if gen_per_class.numel() > 0 and per_rank_min > 0:
+                cond_min = bool((gen_per_class >= per_rank_min).all().item())
+            return cond_total and cond_min
+
+        # With a prior: compute per-class per-rank targets proportionally, respecting per-class minimum
+        num_classes = int(gen_per_class.numel())
+        prior = target_prior[:num_classes].to(gen_per_class.device, dtype=torch.float32)
+        prior = prior / prior.sum()
+        per_class_targets = torch.ceil(prior * float(per_rank_total)).to(
+            gen_per_class.device, dtype=torch.long
+        )
+        if per_rank_min > 0:
+            per_class_targets = torch.maximum(
+                per_class_targets, torch.full_like(per_class_targets, per_rank_min)
+            )
+        cond_total = total_generated >= per_rank_total
+        cond_quota = bool(
+            (gen_per_class.to(torch.long) >= per_class_targets).all().item()
+        )
+        return cond_total and cond_quota
+
+    def _ceil_div(a, b):
+        return math.ceil(float(a) / float(max(b, 1e-12)))
+
+    def compute_local_targets(prior, curr_counts, per_rank_total, per_rank_min):
+        """Return (T, tgt_per_class) for this rank so that:
+        - sum(tgt_per_class) = T
+        - tgt_per_class[k] >= per_rank_min
+        - tgt_per_class[k] ~ prior[k] * T (rounded up)
+        - T is the smallest integer >= per_rank_total such that tgt_per_class[k] >= curr_counts[k] for all k
+        """
+        K = int(curr_counts.numel())
+        p = prior[:K].to(curr_counts.device, dtype=torch.float32)
+        p = p / p.sum()
+        # Lower bound on T so that we can reach current counts and per-class min without deletions
+        lb_from_curr = max(
+            _ceil_div(int(curr_counts[k].item()), float(p[k].item())) if p[k] > 0 else 0
+            for k in range(K)
+        )
+        lb_from_min = (
+            max(
+                _ceil_div(int(per_rank_min), float(p[k].item())) if p[k] > 0 else 0
+                for k in range(K)
+            )
+            if per_rank_min > 0
+            else 0
+        )
+        T = max(int(per_rank_total), int(lb_from_curr), int(lb_from_min))
+        while True:
+            tgt = torch.ceil(p * float(T)).to(curr_counts.device, dtype=torch.long)
+            if per_rank_min > 0:
+                tgt = torch.maximum(tgt, torch.full_like(tgt, int(per_rank_min)))
+            if bool((tgt >= curr_counts).all().item()):
+                break
+            T += 1
+        return T, tgt
+
+    def _format_counts(cnts: torch.Tensor, max_items: int = 20) -> str:
+        try:
+            arr = cnts.detach().to("cpu", non_blocking=True).tolist()
+        except Exception:
+            arr = [int(x) for x in cnts.view(-1).tolist()]
+        K = len(arr)
+        if K <= max_items:
+            return "[" + ",".join(str(int(x)) for x in arr) + "]"
+        head = ",".join(str(int(x)) for x in arr[: max_items // 2])
+        tail = ",".join(str(int(x)) for x in arr[-(max_items // 2) :])
+        return "[" + head + ", …, " + tail + "] (K={K})"
+
+    # Loop over batches.
+    zip_filename = f"generated_images_worker_{dist.get_rank()}.zip"
+    dataset_json = {"labels": []}
+    if no_zip:
+        dist.print0(f'Generating {num_samples} images to "{outdir}"...')
+    else:
+        print(
+            f'Generating {num_samples} images to "{outdir}" and saving them to "{zip_filename}"...'
+        )
+        zip_path = os.path.join(outdir, zip_filename)
+        os.makedirs(outdir, exist_ok=True)
+
+    # Prepare a list to hold image data and their filenames
+    image_data_list = []
+
+    # --- Logging controls (reduced chatter) ---
+    LOG_SECS = 5.0  # at most every 30s
+    LOG_ITERS = 20  # or every 200 iters
+    last_log_time = time.time()
+    iter_idx = 0
+
+    # Per-rank generation counters
+    gen_per_class = torch.zeros(
+        int(getattr(net, "label_dim", 0)), device=device, dtype=torch.long
+    )
+    total_generated = 0
+    id = 0
+
+    regulation_started = False
+    per_rank_total = (int(num_samples) + world_size - 1) // world_size
+    per_rank_min = (
+        (int(min_per_class) + world_size - 1) // world_size
+        if int(min_per_class) > 0
+        else 0
+    )
+    local_target_T = None
+    local_target_per_class = None
+
+    # One-shot startup plan
+    try:
+        dev_name = torch.cuda.get_device_name(torch.cuda.current_device())
+    except Exception:
+        dev_name = "cpu"
+    if dist.get_rank() == 0:
+        print(
+            f"Plan: world_size={world_size}, per-rank total≈{per_rank_total}, per-class min≈{per_rank_min}, device0='{dev_name}'"
+        )
+    print(
+        f"[rank {rank}] target_total≈{per_rank_total}, per-class_min≈{per_rank_min}, device='{dev_name}'"
+    )
+
+    # While loop until we have accepted enough samples for this rank
+    while True:
+        batch_seeds = seed_batch(max_batch_size, id, dist.get_rank())
         rnd = StackedRandomGenerator(device, batch_seeds)
         latents = rnd.randn(
-            [batch_size, net.img_channels, net.img_resolution, net.img_resolution],
+            [max_batch_size, net.img_channels, net.img_resolution, net.img_resolution],
             device=device,
         )
         class_labels = None
         if net.label_dim:
-            class_labels = torch.eye(net.label_dim, device=device)[
-                rnd.randint(net.label_dim, size=[batch_size], device=device)
-            ]
-        if class_idx is not None:
+            if is_cond_model:
+                # If a target prior is provided and not forcing a single class, sample labels from it
+                if (target_prior is not None) and (class_idx is None):
+                    cdf = torch.cumsum(target_prior, dim=0)
+                    u = rnd.rand([max_batch_size], device=device)
+                    idx = torch.searchsorted(cdf, u, right=False).clamp(
+                        max=int(net.label_dim) - 1
+                    )
+                    class_labels = torch.eye(net.label_dim, device=device)[idx]
+                else:
+                    # FIX: update for multihot (currently assumes single-label even for conditional models)
+                    class_labels = torch.eye(net.label_dim, device=device)[
+                        rnd.randint(net.label_dim, size=[max_batch_size], device=device)
+                    ]
+            else:
+                # Unconditional model: sampler ignores labels anyway; keep uniform placeholder if present
+                class_labels = torch.eye(net.label_dim, device=device)[
+                    rnd.randint(net.label_dim, size=[max_batch_size], device=device)
+                ]
+        if class_idx is not None and class_labels is not None:
             class_labels[:, :] = 0
             class_labels[:, class_idx] = 1
 
@@ -526,12 +350,7 @@ def main(
         sampler_kwargs = {
             key: value for key, value in sampler_kwargs.items() if value is not None
         }
-        have_ablation_kwargs = any(
-            x in sampler_kwargs
-            for x in ["solver", "discretization", "schedule", "scaling"]
-        )
-        sampler_fn = ablation_sampler if have_ablation_kwargs else edm_sampler
-        images = sampler_fn(
+        images = edm_sampler(
             net, latents, class_labels, randn_like=rnd.randn_like, **sampler_kwargs
         )
 
@@ -544,19 +363,222 @@ def main(
             .cpu()
             .numpy()
         )
-        for seed, image_np in zip(batch_seeds, images_np):
-            image_dir = (
-                os.path.join(outdir, f"{seed - seed % 1000:06d}") if subdirs else outdir
-            )
-            os.makedirs(image_dir, exist_ok=True)
-            image_path = os.path.join(image_dir, f"{seed:06d}.png")
-            if image_np.shape[2] == 1:
-                PIL.Image.fromarray(image_np[:, :, 0], "L").save(image_path)
-            else:
-                PIL.Image.fromarray(image_np, "RGB").save(image_path)
+        if class_labels is not None:
+            class_labels = class_labels.argmax(dim=1, keepdim=True)
+        else:
+            if clf_uncond:
+                class_labels = classif((images.clip(-1, 1) + 1) / 2).logits.argmax(
+                    dim=1, keepdim=True
+                )
 
+        # Ensure we have the class dimension
+
+        if class_labels is None or class_labels.numel() == 0:
+            # If no labels provided by the net, classify generated images (unconditional models)
+            if clf_uncond:
+                class_labels = classif((images.clip(-1, 1) + 1) / 2).logits.argmax(
+                    dim=1, keepdim=True
+                )
+
+        # Lazy-init per-class counters for unconditional models (or when label_dim == 0)
+        if gen_per_class.numel() == 0:
+            if target_prior is not None:
+                K = int(target_prior.numel())
+            else:
+                # Infer K from observed labels in this batch
+                K = (
+                    int(class_labels.max().item()) + 1
+                    if class_labels.numel() > 0
+                    else 0
+                )
+            if K > 0:
+                gen_per_class = torch.zeros(K, device=device, dtype=torch.long)
+
+        # Phase switch for unconditional models: after warmup to per-rank total, compute local per-class targets
+        if (
+            (not regulation_started)
+            and (not is_cond_model)
+            and (total_generated >= per_rank_total)
+            and (target_prior is not None)
+            and (gen_per_class.numel() > 0)
+        ):
+            local_target_T, local_target_per_class = compute_local_targets(
+                target_prior, gen_per_class, per_rank_total, per_rank_min
+            )
+            regulation_started = True
+            print(
+                f"[Rank] {rank} - [Regulation] Starting with T={local_target_T}, per-rank min={per_rank_min}"
+            )
+
+        # Deterministic admission after regulation starts: keep only classes that still need quota
+        if (
+            regulation_started
+            and local_target_per_class is not None
+            and gen_per_class.numel() == local_target_per_class.numel()
+        ):
+            remaining = (local_target_per_class - gen_per_class).clamp_min(0)
+            labels_1d = class_labels.view(-1).to(torch.long)
+            keep_mask = torch.zeros(labels_1d.shape[0], device=device, dtype=torch.bool)
+            take_local = torch.zeros_like(remaining)
+            for i in range(labels_1d.shape[0]):
+                c = int(labels_1d[i].item())
+                if 0 <= c < remaining.numel() and take_local[c] < remaining[c]:
+                    keep_mask[i] = True
+                    take_local[c] += 1
+            # Apply mask (drop over-represented classes)
+            if keep_mask.sum().item() < labels_1d.shape[0]:
+                images_np = images_np[keep_mask.cpu().numpy()]
+                class_labels = class_labels[keep_mask]
+                batch_seeds = batch_seeds[keep_mask.cpu()]
+
+        # Update per-class counters from the kept labels of this batch
+        if (
+            class_labels is not None
+            and class_labels.numel() > 0
+            and gen_per_class.numel() > 0
+        ):
+            lbl = torch.as_tensor(
+                class_labels.view(-1), device=device, dtype=torch.long
+            )
+            binc = torch.bincount(lbl, minlength=gen_per_class.numel())
+            gen_per_class[: binc.numel()] += binc.to(torch.long)
+
+        # If under regulation, stop when local per-class targets are reached
+        if regulation_started and local_target_per_class is not None:
+            if bool((gen_per_class >= local_target_per_class).all().item()):
+                break
+
+        # Convert labels to numpy for saving
+        class_labels_np = class_labels.view(-1).cpu().numpy()
+
+        # If nothing accepted this round, continue to try again
+        if len(class_labels_np) == 0:
+            id += 1
+            continue
+
+        # Ensure seeds are plain ints for formatting
+        if torch.is_tensor(batch_seeds):
+            batch_seeds_iter = [int(s) for s in batch_seeds.tolist()]
+        else:
+            batch_seeds_iter = batch_seeds
+
+        
+
+        # Save images and update dataset
+        for seed, image_np, label in zip(batch_seeds_iter, images_np, class_labels_np):
+            seed_int = int(seed)
+            label_int = int(label)
+            if no_zip or seed_int < 100:
+                image_dir = (
+                    os.path.join(
+                        outdir, f"{seed_int - seed_int % 1000:06d}", f"{label_int}"
+                    )
+                    if subdirs
+                    else outdir
+                )
+                os.makedirs(image_dir, exist_ok=True)
+                image_path = os.path.join(image_dir, f"{seed_int:06d}.png")
+                if image_np.shape[2] == 1:
+                    PIL.Image.fromarray(image_np[:, :, 0], "L").save(image_path)
+                else:
+                    PIL.Image.fromarray(image_np, "RGB").save(image_path)
+            if not no_zip:
+                if image_np.shape[2] == 1:
+                    img = PIL.Image.fromarray(image_np[:, :, 0], "L")
+                else:
+                    img = PIL.Image.fromarray(image_np, "RGB")
+                img_bytes = io.BytesIO()
+                img.save(img_bytes, format="PNG")
+                img_bytes.seek(0)
+                image_filename = f"{seed_int:06d}.png"
+                image_data_list.append((image_filename, img_bytes.getvalue()))
+                dataset_json["labels"].append([f"{seed_int:06d}.png", label_int])
+            total_generated += 1
+
+        # Stop early if no prior or before regulation kicks in
+        if (target_prior is None) or (not regulation_started):
+            if can_end(
+                num_samples, min_per_class, gen_per_class, total_generated, target_prior
+            ):
+                break
+
+        # Optional: throttled progress print (rank 0 only)
+        iter_idx += 1
+        now = time.time()
+        if (rank == 0) and (
+            (now - last_log_time) >= LOG_SECS or (iter_idx % LOG_ITERS == 0)
+        ):
+            last_log_time = now
+            try:
+                mem_used = (
+                    torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]
+                ) / 1e9
+                mem_tot = torch.cuda.mem_get_info()[1] / 1e9
+                mem_str = f"mem {mem_used:.2f}/{mem_tot:.2f} GB"
+            except Exception:
+                mem_str = "mem N/A"
+            per_class_min_now = (
+                int(gen_per_class.min().item()) if gen_per_class.numel() else 0
+            )
+            extra = ""
+            if (
+                regulation_started
+                and local_target_per_class is not None
+                and gen_per_class.numel() == local_target_per_class.numel()
+            ):
+                rem_min = int(
+                    (local_target_per_class - gen_per_class).clamp_min(0).min().item()
+                )
+                extra = f" | reg on, rem-min {rem_min}"
+            per_class_counts_str = _format_counts(gen_per_class)
+            print(
+                f"[Rank 0] generated {total_generated} | per-class min {per_class_min_now} | counts {per_class_counts_str} | {mem_str}{extra}"
+            )
+
+        id += 1
+    print(f"[rank {rank}] accepted {total_generated} images")
     # Done.
+    if not no_zip:
+        # Sort the images by filename
+        image_data_list.sort(key=lambda x: x[0])
+
+        # Open a ZIP file to collect all sorted images
+        with zipfile.ZipFile(zip_path, "w") as myzip:
+            for filename, data in image_data_list:
+                # Write sorted image data to the ZIP file
+                myzip.writestr(filename, data)
+            myzip.writestr("dataset.json", json.dumps(dataset_json))
+
     torch.distributed.barrier()
+    dataset_json_all = {"labels": []}
+    if dist.get_rank() == 0:
+        all_zip_files = [
+            os.path.join(outdir, f)
+            for f in os.listdir(outdir)
+            if f.startswith("generated_images_worker") and f.endswith(".zip")
+        ]
+
+        # Merge all ZIP files
+        final_zip_path = os.path.join(outdir, "generated_images.zip")
+        with zipfile.ZipFile(final_zip_path, "w") as final_zip:
+            for zip_file in all_zip_files:
+                with zipfile.ZipFile(zip_file, "r") as zfile:
+                    for file_name in zfile.namelist():
+                        # Extract file data from the zip
+                        with zfile.open(file_name) as file:
+                            file_data = file.read()
+                        if file_name == "dataset.json":
+                            dataset_json_all["labels"].extend(
+                                json.loads(file_data)["labels"]
+                            )
+                        else:
+                            # Write file to the final zip, maintaining directory structure if necessary
+                            final_zip.writestr(file_name, file_data)
+            final_zip.writestr("dataset.json", json.dumps(dataset_json_all))
+
+        # Optionally, delete individual worker ZIP files after merging
+        for zip_file in all_zip_files:
+            os.remove(zip_file)
     dist.print0("Done.")
 
 
