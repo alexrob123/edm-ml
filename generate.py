@@ -61,6 +61,98 @@ def parse_float_list(s):
 # ----------------------------------------------------------------------------
 
 
+def _ceil_div(a, b):
+    return math.ceil(float(a) / float(max(b, 1e-12)))
+
+
+def _format_counts(cnts: torch.Tensor, max_items: int = 20) -> str:
+    try:
+        arr = cnts.detach().to("cpu", non_blocking=True).tolist()
+    except Exception:
+        arr = [int(x) for x in cnts.view(-1).tolist()]
+    K = len(arr)
+    if K <= max_items:
+        return "[" + ",".join(str(int(x)) for x in arr) + "]"
+    head = ",".join(str(int(x)) for x in arr[: max_items // 2])
+    tail = ",".join(str(int(x)) for x in arr[-(max_items // 2) :])
+    return "[" + head + ", …, " + tail + "] (K={K})"
+
+
+def compute_local_targets(prior, curr_counts, per_rank_total, per_rank_min):
+    """Return (T, tgt_per_class) for this rank so that:
+    - sum(tgt_per_class) = T
+    - tgt_per_class[k] >= per_rank_min
+    - tgt_per_class[k] ~ prior[k] * T (rounded up)
+    - T is the smallest integer >= per_rank_total such that tgt_per_class[k] >= curr_counts[k] for all k
+    """
+    K = int(curr_counts.numel())
+    p = prior[:K].to(curr_counts.device, dtype=torch.float32)
+    p = p / p.sum()
+    # Lower bound on T so that we can reach current counts and per-class min without deletions
+    lb_from_curr = max(
+        _ceil_div(int(curr_counts[k].item()), float(p[k].item())) if p[k] > 0 else 0
+        for k in range(K)
+    )
+    lb_from_min = (
+        max(
+            _ceil_div(int(per_rank_min), float(p[k].item())) if p[k] > 0 else 0
+            for k in range(K)
+        )
+        if per_rank_min > 0
+        else 0
+    )
+    T = max(int(per_rank_total), int(lb_from_curr), int(lb_from_min))
+    while True:
+        tgt = torch.ceil(p * float(T)).to(curr_counts.device, dtype=torch.long)
+        if per_rank_min > 0:
+            tgt = torch.maximum(tgt, torch.full_like(tgt, int(per_rank_min)))
+        if bool((tgt >= curr_counts).all().item()):
+            break
+        T += 1
+    return T, tgt
+
+
+def can_end(
+    world_size,
+    num_samples,
+    min_per_class,
+    gen_per_class,
+    total_generated,
+    target_prior,
+):
+    ws = world_size
+
+    # Per-rank targets
+    per_rank_total = (int(num_samples) + ws - 1) // ws
+    per_rank_min = (int(min_per_class) + ws - 1) // ws if int(min_per_class) > 0 else 0
+
+    # If no prior: stop when per-rank total reached and per-class minimums met
+    if target_prior is None:
+        cond_total = total_generated >= per_rank_total
+        cond_min = True
+        if gen_per_class.numel() > 0 and per_rank_min > 0:
+            cond_min = bool((gen_per_class >= per_rank_min).all().item())
+        return cond_total and cond_min
+
+    # With a prior: compute per-class per-rank targets proportionally, respecting per-class minimum
+    num_classes = int(gen_per_class.numel())
+    prior = target_prior[:num_classes].to(gen_per_class.device, dtype=torch.float32)
+    prior = prior / prior.sum()
+    per_class_targets = torch.ceil(prior * float(per_rank_total)).to(
+        gen_per_class.device, dtype=torch.long
+    )
+    if per_rank_min > 0:
+        per_class_targets = torch.maximum(
+            per_class_targets, torch.full_like(per_class_targets, per_rank_min)
+        )
+    cond_total = total_generated >= per_rank_total
+    cond_quota = bool((gen_per_class.to(torch.long) >= per_class_targets).all().item())
+    return cond_total and cond_quota
+
+
+# ----------------------------------------------------------------------------
+
+
 # fmt: off
 @click.command()
 @click.option("--network", "network_pkl",           help="Network pickle filename", metavar="PATH|URL",                         type=str, required=True)
@@ -117,6 +209,10 @@ def main(
     if dist.get_rank() != 0:
         torch.distributed.barrier()
 
+    dist.print0("Distributed setting initialized:")
+    dist.print0(f"  world size: {world_size}")
+    dist.print0(f"  rank: {rank}")
+
     # Show parameters
     dist.print0("Generating with the following constraints:")
     dist.print0(f"  num_samples: {num_samples}")
@@ -160,14 +256,18 @@ def main(
 
     # --- Rejection sampling setup (optional) ---
     target_prior = None
+
     if target_prior_str is not None:
         tp = torch.tensor(
-            parse_float_list(target_prior_str), device=device, dtype=torch.float32
+            parse_float_list(target_prior_str),
+            device=device,
+            dtype=torch.float32,
         )
         if (tp <= 0).any():
             raise click.ClickException("All target-prior entries must be positive.")
         target_prior = tp / tp.sum()
         dist.print0(f"Using target prior (normalized): {target_prior.tolist()}")
+
         # For conditional models, ensure prior length matches label_dim
         if (
             "is_cond_model" in locals()
@@ -179,89 +279,6 @@ def main(
                     f"Target prior length ({target_prior.numel()}) must equal model label_dim ({int(net.label_dim)})."
                 )
 
-    def can_end(
-        num_samples, min_per_class, gen_per_class, total_generated, target_prior
-    ):
-        ws = world_size
-        # Per-rank targets
-        per_rank_total = (int(num_samples) + ws - 1) // ws
-        per_rank_min = (
-            (int(min_per_class) + ws - 1) // ws if int(min_per_class) > 0 else 0
-        )
-
-        # If no prior: stop when per-rank total reached and per-class minimums met
-        if target_prior is None:
-            cond_total = total_generated >= per_rank_total
-            cond_min = True
-            if gen_per_class.numel() > 0 and per_rank_min > 0:
-                cond_min = bool((gen_per_class >= per_rank_min).all().item())
-            return cond_total and cond_min
-
-        # With a prior: compute per-class per-rank targets proportionally, respecting per-class minimum
-        num_classes = int(gen_per_class.numel())
-        prior = target_prior[:num_classes].to(gen_per_class.device, dtype=torch.float32)
-        prior = prior / prior.sum()
-        per_class_targets = torch.ceil(prior * float(per_rank_total)).to(
-            gen_per_class.device, dtype=torch.long
-        )
-        if per_rank_min > 0:
-            per_class_targets = torch.maximum(
-                per_class_targets, torch.full_like(per_class_targets, per_rank_min)
-            )
-        cond_total = total_generated >= per_rank_total
-        cond_quota = bool(
-            (gen_per_class.to(torch.long) >= per_class_targets).all().item()
-        )
-        return cond_total and cond_quota
-
-    def _ceil_div(a, b):
-        return math.ceil(float(a) / float(max(b, 1e-12)))
-
-    def compute_local_targets(prior, curr_counts, per_rank_total, per_rank_min):
-        """Return (T, tgt_per_class) for this rank so that:
-        - sum(tgt_per_class) = T
-        - tgt_per_class[k] >= per_rank_min
-        - tgt_per_class[k] ~ prior[k] * T (rounded up)
-        - T is the smallest integer >= per_rank_total such that tgt_per_class[k] >= curr_counts[k] for all k
-        """
-        K = int(curr_counts.numel())
-        p = prior[:K].to(curr_counts.device, dtype=torch.float32)
-        p = p / p.sum()
-        # Lower bound on T so that we can reach current counts and per-class min without deletions
-        lb_from_curr = max(
-            _ceil_div(int(curr_counts[k].item()), float(p[k].item())) if p[k] > 0 else 0
-            for k in range(K)
-        )
-        lb_from_min = (
-            max(
-                _ceil_div(int(per_rank_min), float(p[k].item())) if p[k] > 0 else 0
-                for k in range(K)
-            )
-            if per_rank_min > 0
-            else 0
-        )
-        T = max(int(per_rank_total), int(lb_from_curr), int(lb_from_min))
-        while True:
-            tgt = torch.ceil(p * float(T)).to(curr_counts.device, dtype=torch.long)
-            if per_rank_min > 0:
-                tgt = torch.maximum(tgt, torch.full_like(tgt, int(per_rank_min)))
-            if bool((tgt >= curr_counts).all().item()):
-                break
-            T += 1
-        return T, tgt
-
-    def _format_counts(cnts: torch.Tensor, max_items: int = 20) -> str:
-        try:
-            arr = cnts.detach().to("cpu", non_blocking=True).tolist()
-        except Exception:
-            arr = [int(x) for x in cnts.view(-1).tolist()]
-        K = len(arr)
-        if K <= max_items:
-            return "[" + ",".join(str(int(x)) for x in arr) + "]"
-        head = ",".join(str(int(x)) for x in arr[: max_items // 2])
-        tail = ",".join(str(int(x)) for x in arr[-(max_items // 2) :])
-        return "[" + head + ", …, " + tail + "] (K={K})"
-
     # Loop over batches.
     zip_filename = f"generated_images_worker_{dist.get_rank()}.zip"
     dataset_json = {"labels": []}
@@ -269,7 +286,8 @@ def main(
         dist.print0(f'Generating {num_samples} images to "{outdir}"...')
     else:
         print(
-            f'Generating {num_samples} images to "{outdir}" and saving them to "{zip_filename}"...'
+            f'Generating {num_samples} images to "{outdir}" '
+            f'and saving them to "{zip_filename}"...'
         )
         zip_path = os.path.join(outdir, zip_filename)
         os.makedirs(outdir, exist_ok=True)
@@ -307,10 +325,16 @@ def main(
         dev_name = "cpu"
     if dist.get_rank() == 0:
         print(
-            f"Plan: world_size={world_size}, per-rank total≈{per_rank_total}, per-class min≈{per_rank_min}, device0='{dev_name}'"
+            f"Plan: world_size={world_size}, "
+            f"per-rank total≈{per_rank_total}, "
+            f"per-class min≈{per_rank_min}, "
+            f"device0='{dev_name}'"
         )
     print(
-        f"[rank {rank}] target_total≈{per_rank_total}, per-class_min≈{per_rank_min}, device='{dev_name}'"
+        f"[rank {rank}] "
+        f"target_total≈{per_rank_total}, "
+        f"per-class_min≈{per_rank_min}, "
+        f"device='{dev_name}'"
     )
 
     # While loop until we have accepted enough samples for this rank
@@ -321,6 +345,8 @@ def main(
             [max_batch_size, net.img_channels, net.img_resolution, net.img_resolution],
             device=device,
         )
+
+        # FIX: determine class labels (MHE)
         class_labels = None
         if net.label_dim:
             if is_cond_model:
@@ -345,6 +371,8 @@ def main(
         if class_idx is not None and class_labels is not None:
             class_labels[:, :] = 0
             class_labels[:, class_idx] = 1
+
+        # FIX END
 
         # Generate images.
         sampler_kwargs = {
@@ -403,7 +431,10 @@ def main(
             and (gen_per_class.numel() > 0)
         ):
             local_target_T, local_target_per_class = compute_local_targets(
-                target_prior, gen_per_class, per_rank_total, per_rank_min
+                target_prior,
+                gen_per_class,
+                per_rank_total,
+                per_rank_min,
             )
             regulation_started = True
             print(
@@ -462,8 +493,6 @@ def main(
         else:
             batch_seeds_iter = batch_seeds
 
-        
-
         # Save images and update dataset
         for seed, image_np, label in zip(batch_seeds_iter, images_np, class_labels_np):
             seed_int = int(seed)
@@ -498,7 +527,12 @@ def main(
         # Stop early if no prior or before regulation kicks in
         if (target_prior is None) or (not regulation_started):
             if can_end(
-                num_samples, min_per_class, gen_per_class, total_generated, target_prior
+                world_size,
+                num_samples,
+                min_per_class,
+                gen_per_class,
+                total_generated,
+                target_prior,
             ):
                 break
 
@@ -532,12 +566,16 @@ def main(
                 extra = f" | reg on, rem-min {rem_min}"
             per_class_counts_str = _format_counts(gen_per_class)
             print(
-                f"[Rank 0] generated {total_generated} | per-class min {per_class_min_now} | counts {per_class_counts_str} | {mem_str}{extra}"
+                f"[Rank 0] generated {total_generated} "
+                f"| per-class min {per_class_min_now} "
+                f"| counts {per_class_counts_str} "
+                f"| {mem_str}{extra}"
             )
 
         id += 1
     print(f"[rank {rank}] accepted {total_generated} images")
     # Done.
+
     if not no_zip:
         # Sort the images by filename
         image_data_list.sort(key=lambda x: x[0])
