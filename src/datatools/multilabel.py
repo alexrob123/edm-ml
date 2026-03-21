@@ -5,6 +5,30 @@ import numpy as np
 import torch
 
 # --------------------------------------------------------------------------------
+
+
+def all_bvec(dim, device="cpu"):
+    n = 2**dim
+    x = torch.arange(n, device=device)
+    return ((x.unsqueeze(1) >> torch.arange(dim, device=device)) & 1).flip(1)
+
+
+def bvec2int(x: torch.Tensor) -> torch.Tensor:
+    """
+    Convert a tensor of binary values (0/1) to integers.
+
+    Args:
+        x: Tensor of shape (..., n_bits) with 0/1 values
+
+    Returns:
+        Tensor of shape (...) with integer values
+    """
+    n_bits = x.size(-1)
+    powers = 2 ** torch.arange(n_bits - 1, -1, -1, device=x.device)
+    return (x * powers).sum(dim=-1)
+
+
+# --------------------------------------------------------------------------------
 # Conversions
 
 
