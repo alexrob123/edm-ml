@@ -335,7 +335,7 @@ def compute_dino_stats(
 # => we map gen-labels (true labels) to dino-labels (pred labels)
 # ----------------------------------------------------------------------------------------------------
 
-APPLY_LABEL_MAPPING = True
+APPLY_LABEL_MAPPING = False
 
 LABEL_MAPPING = {
     0: 7,
