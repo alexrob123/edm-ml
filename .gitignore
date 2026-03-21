@@ -6,6 +6,7 @@ jeanzay/
 models/*
 notebooks/*
 scripts/*
+TO-DO*
 outputs/*
 out*/
 *.log

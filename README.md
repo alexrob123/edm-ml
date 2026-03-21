@@ -68,8 +68,8 @@ The dataset structure is built to be compatible with [EDM project](https://githu
 
 ```bash
 uv run dataset_tool.py \
-    --source ./data/CelebA/edited/<dataset-name>/dataset_raw.zip \
-    --dest  ./data/CelebA/edited/<dataset-name>/dataset.zip \
+    --source ./data/CelebA/edited/<dataset>/dataset_raw.zip \
+    --dest  ./out-dataset-tool/<dataset-resolution>.zip \
     --transform center-crop \
     --resolution 64x64
 ```
@@ -82,8 +82,8 @@ cd edm
 conda env create -f environment.yml -n edm
 conda activate edm
 python dataset_tool.py \
-    --source ./data/CelebA/edited/<dataset-name>/dataset_raw.zip \
-    --dest  ./data/CelebA/edited/<dataset-name>/dataset.zip \
+    --source ./data/CelebA/edited/<dataset>/dataset_raw.zip \
+    --dest  ./out-dataset-tools/<dataset-resolution>.zip \
     --transform center-crop \
     --resolution 64x64
 ```

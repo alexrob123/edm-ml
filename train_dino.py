@@ -85,10 +85,10 @@ def main(name, data, num_labels, method, batch_size, num_epochs, seed, evaluate)
 
     if name is None:
         ckpt_dir = Path.cwd() / "checkpoints" / dataset_name
-        eval_dir = Path.cwd() / "outputs" / dataset_name
+        eval_dir = Path.cwd() / "out-train-dino" / dataset_name
     else:
         ckpt_dir = Path.cwd() / "checkpoints" / name / dataset_name
-        eval_dir = Path.cwd() / "outputs" / name / dataset_name
+        eval_dir = Path.cwd() / "out-train-dino" / dataset_name
 
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     eval_dir.mkdir(parents=True, exist_ok=True)
