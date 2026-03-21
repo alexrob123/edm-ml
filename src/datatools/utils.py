@@ -27,6 +27,12 @@ def extract_dataset_name(path):
     return name.lower()
 
 
+def read_json(path):
+    with open(path, "r") as f:
+        data = json.load(f)
+    return data
+
+
 def zip_meta(path, fname="dataset.json"):
     with ZipFile(path) as z:
         with z.open(fname, "r") as j:
