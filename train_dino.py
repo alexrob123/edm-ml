@@ -60,21 +60,16 @@ ACC_COMPUTATION = {
 ####################################################################################################
 ####################################################################################################
 
-# fmt: off
 
 @click.command()
-
-@click.option("--name",                 help="Experiment name",                            type=str, default="dino")
-@click.option("--data", "-d",           help="Path to the dataset", metavar="DIR|ZIP",     type=click.Path(exists=True), required=True)
-@click.option("--num-labels", "-nl",    help="Num labels in dataset (not labelsets)",      type=int, required=True,)
-@click.option("--method", "-mll",       help="MLL method",                                 type=click.Choice(["br", "lp"]), required=True)
-@click.option("--batch", "batch_size",  help="Batch size",                                 type=int, default=256, show_default=True)
-@click.option("--epochs", "num_epochs", help="Number of epochs for training",              type=int, default=10, show_default=True)
-@click.option("--seed",                 help="Seed for randomness",                        type=int, default=0, show_default=True)
-@click.option( "--evaluate",            help="Run 1 evaluation epoch instead of training", is_flag=True)
-
-# fmt: on
-
+@click.option("--name",                 help="Experiment name",                            type=str, default="dino")  # fmt: skip
+@click.option("--data", "-d",           help="Path to the dataset", metavar="DIR|ZIP",     type=click.Path(exists=True), required=True)  # fmt: skip
+@click.option("--num-labels", "-nl",    help="Num labels in dataset (not labelsets)",      type=int, required=True,)  # fmt: skip
+@click.option("--method", "-mll",       help="MLL method",                                 type=click.Choice(["br", "lp"]), required=True)  # fmt: skip
+@click.option("--batch", "batch_size",  help="Batch size",                                 type=int, default=256, show_default=True)  # fmt: skip
+@click.option("--epochs", "num_epochs", help="Number of epochs for training",              type=int, default=10, show_default=True)  # fmt: skip
+@click.option("--seed",                 help="Seed for randomness",                        type=int, default=0, show_default=True)  # fmt: skip
+@click.option( "--evaluate",            help="Run 1 evaluation epoch instead of training", is_flag=True)  # fmt: skip
 def main(name, data, num_labels, method, batch_size, num_epochs, seed, evaluate):
     logger.info(f"{'EVALUATION' if evaluate else 'TRAINING'}")
 
@@ -167,7 +162,7 @@ def main(name, data, num_labels, method, batch_size, num_epochs, seed, evaluate)
 
     if evaluate and ckpt_path.exists():
         ckpt = torch.load(ckpt_path, map_location=device)
-        
+
         model.module.load_state_dict(ckpt["model"])
         monitor = ckpt["monitor"]
 

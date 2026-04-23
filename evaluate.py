@@ -10,23 +10,27 @@ import scipy
 import torch
 
 import dnnlib
+from datatools.utils import extract_dataset_name, resolve_output
 from evaluation.tpr import PCA, compute_top_pr
 from torch_utils import distributed as dist
 from training import classifier
 from training.dataset import ImageFolderDataset
 
 FLAG_INCEPTION_REF_PATH = "inception-ref"
-FLAG_DINO_REF_PATH = "dino-ref"
+FLAG_INCEPTION_STATS_PATH = "inception-stats"
 INCEPTION_STATS_FILE = "inception_stats.npy"
-DINO_STATS_FILE = "dino_stats.npy"
 
+FLAG_DINO_REF_PATH = "dino-ref"
+FLAG_DINO_STATS_PATH = "dino-stats"
+DINO_STATS_FILE = "dino_stats.npy"
 
 ####################################################################################################
 # Inception features and stats
 ####################################################################################################
 
 
-def compute_inception_stats(
+def compute_model_stats(
+    model,
     image_path,
     num_expected=None,
     seed=0,
@@ -39,16 +43,28 @@ def compute_inception_stats(
     if dist.get_rank() != 0:
         torch.distributed.barrier()
 
-    # Load Inception-v3 model.
-    # PyTorch translation of http://download.tensorflow.org/models/image/imagenet/inception-2015-12-05.tgz
-    dist.print0("Loading Inception-v3 model...")
+    # Load model.
+    if model == "dino":
+        # Load Dino v2 model.
+        dist.print0("Loading DINO v2 model...")
+        detector_net = classifier.FeatureExtractor(url=image_path).to(device)
+        detector_kwargs = {}
+        feature_dim = 768
 
-    detector_url = "https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/metrics/inception-2015-12-05.pkl"
-    detector_kwargs = dict(return_features=True)
-    feature_dim = 2048
+    elif model == "inception":
+        # Load Inception-v3 model.
+        # PyTorch translation of http://download.tensorflow.org/models/image/imagenet/inception-2015-12-05.tgz
+        dist.print0("Loading Inception-v3 model...")
 
-    with dnnlib.util.open_url(detector_url, verbose=(dist.get_rank() == 0)) as f:
-        detector_net = pickle.load(f).to(device)
+        detector_url = "https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/metrics/inception-2015-12-05.pkl"
+        detector_kwargs = dict(return_features=True)
+        feature_dim = 2048
+
+        with dnnlib.util.open_url(detector_url, verbose=(dist.get_rank() == 0)) as f:
+            detector_net = pickle.load(f).to(device)
+
+    else:
+        raise ValueError(f"Unknown model: {model}")
 
     # List images.
     dist.print0(f'Loading images from "{image_path}"...')
@@ -60,7 +76,9 @@ def compute_inception_stats(
         use_labels=True,
     )
     num_labels = dataset.label_dim
-    dist.print0(f"Number of labels in the dataset: {num_labels}")
+    dist.print0(f"\tNumber of labels in the dataset: {num_labels}")
+    dist.print0(f"\tDataset has hot labels: {dataset.has_hot_labels}")
+    dist.print0(f"\tDataset is multilabel: {dataset.is_multilabel}")
 
     if num_expected is not None and len(dataset) < num_expected:
         raise click.ClickException(
@@ -119,21 +137,27 @@ def compute_inception_stats(
             images = images.repeat([1, 3, 1, 1])
 
         # Overall statistics.
-        features = detector_net(images.to(device), **detector_kwargs).to(torch.float64)
+        with torch.no_grad():
+            features = detector_net(images.to(device), **detector_kwargs).to(
+                torch.float64
+            )
         mu[0] += features.sum(0)
         sigma[0] += features.T @ features
         list_features[0].append(features.cpu())
 
         # Label-wise statistics.
-        # Labels are either a single label or a one-hot encoded vector
         if _labels.ndim == 1:
             _labels = _labels.unsqueeze(1)
-        _labels = torch.argmax(_labels, dim=1)
 
         for label in range(1, num_labels + 1):
-            idx = _labels == label - 1
+            if dataset.is_multilabel:
+                idx = _labels[:, label - 1] == 1
+            else:
+                idx = torch.argmax(_labels, dim=1) == label - 1
+
             if idx.sum() == 0:
                 continue
+
             mu[label] += features[idx].sum(0)
             sigma[label] += features[idx].T @ features[idx]
             list_features[label].append(features[idx].cpu())
@@ -164,6 +188,175 @@ def compute_inception_stats(
         [x.cpu().numpy() for x in mu],
         [x.cpu().numpy() for x in sigma],
     )
+
+
+####################################################################################################
+# Inception features and stats
+####################################################################################################
+
+
+def compute_inception_stats(
+    image_path,
+    num_expected=None,
+    seed=0,
+    max_batch_size=64,
+    num_workers=3,
+    prefetch_factor=2,
+    device=torch.device("cuda"),
+):
+    return compute_model_stats(
+        model="inception",
+        image_path=image_path,
+        num_expected=num_expected,
+        seed=seed,
+        max_batch_size=max_batch_size,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
+        device=device,
+    )
+
+
+# def compute_inception_stats(
+#     image_path,
+#     num_expected=None,
+#     seed=0,
+#     max_batch_size=64,
+#     num_workers=3,
+#     prefetch_factor=2,
+#     device=torch.device("cuda"),
+# ):
+#     # Rank 0 goes first.
+#     if dist.get_rank() != 0:
+#         torch.distributed.barrier()
+
+#     # Load Inception-v3 model.
+#     # PyTorch translation of http://download.tensorflow.org/models/image/imagenet/inception-2015-12-05.tgz
+#     dist.print0("Loading Inception-v3 model...")
+
+#     detector_url = "https://api.ngc.nvidia.com/v2/models/nvidia/research/stylegan3/versions/1/files/metrics/inception-2015-12-05.pkl"
+#     detector_kwargs = dict(return_features=True)
+#     feature_dim = 2048
+
+#     with dnnlib.util.open_url(detector_url, verbose=(dist.get_rank() == 0)) as f:
+#         detector_net = pickle.load(f).to(device)
+
+#     # List images.
+#     dist.print0(f'Loading images from "{image_path}"...')
+
+#     dataset = ImageFolderDataset(
+#         path=image_path,
+#         max_size=num_expected,
+#         random_seed=seed,
+#         use_labels=True,
+#     )
+#     num_labels = dataset.label_dim
+#     dist.print0(f"Number of labels in the dataset: {num_labels}")
+
+#     if num_expected is not None and len(dataset) < num_expected:
+#         raise click.ClickException(
+#             f"Found {len(dataset)} images, but expected at least {num_expected}"
+#         )
+#     if len(dataset) < 2:
+#         raise click.ClickException(
+#             f"Found {len(dataset)} images, but need at least 2 to compute statistics"
+#         )
+
+#     # Other ranks follow.
+#     if dist.get_rank() == 0:
+#         torch.distributed.barrier()
+
+#     # Divide images into batches.
+#     num_batches = (
+#         (len(dataset) - 1) // (max_batch_size * dist.get_world_size()) + 1
+#     ) * dist.get_world_size()
+#     all_batches = torch.arange(len(dataset)).tensor_split(num_batches)
+#     rank_batches = all_batches[dist.get_rank() :: dist.get_world_size()]
+
+#     data_loader = torch.utils.data.DataLoader(
+#         dataset,
+#         batch_sampler=rank_batches,
+#         num_workers=num_workers,
+#         prefetch_factor=prefetch_factor,
+#     )
+
+#     # Accumulate statistics.
+#     # Index 0 for the overall statistics.
+#     dist.print0(f"Calculating statistics for {len(dataset)} images...")
+
+#     mu = [
+#         torch.zeros([feature_dim], dtype=torch.float64, device=device)
+#         for _ in range(num_labels + 1)
+#     ]
+#     sigma = [
+#         torch.zeros([feature_dim, feature_dim], dtype=torch.float64, device=device)
+#         for _ in range(num_labels + 1)
+#     ]
+#     list_features = [[] for _ in range(num_labels + 1)]
+
+#     t0 = time.time()
+#     for k, (images, _labels) in enumerate(data_loader):
+#         if k == 100:
+#             dist.print0(
+#                 f"Estimated time to finish:"
+#                 f" {(time.time() - t0) / k * (len(data_loader) - k) / 60:.2f} min"
+#             )
+
+#         torch.distributed.barrier()
+
+#         if images.shape[0] == 0:
+#             continue
+#         if images.shape[1] == 1:
+#             images = images.repeat([1, 3, 1, 1])
+
+#         # Overall statistics.
+#         features = detector_net(images.to(device), **detector_kwargs).to(torch.float64)
+#         mu[0] += features.sum(0)
+#         sigma[0] += features.T @ features
+#         list_features[0].append(features.cpu())
+
+#         # Label-wise statistics.
+#         if _labels.ndim == 1:
+#             _labels = _labels.unsqueeze(1)
+
+#         for label in range(1, num_labels + 1):
+#             if dataset.is_multilabel:
+#                 idx = _labels[:, label - 1] == 1
+#             else:
+#                 idx = torch.argmax(_labels, dim=1) == label - 1
+
+#             if idx.sum() == 0:
+#                 continue
+
+#             mu[label] += features[idx].sum(0)
+#             sigma[label] += features[idx].T @ features[idx]
+#             list_features[label].append(features[idx].cpu())
+
+#     for label in range(num_labels + 1):
+#         list_features[label] = torch.cat(list_features[label], dim=0)
+
+#     gathered_features = [
+#         [torch.zeros_like(list_features[i]) for _ in range(dist.get_world_size())]
+#         for i in range(num_labels + 1)
+#     ]
+
+#     # Calculate grand totals.
+#     for label in range(num_labels + 1):
+#         torch.distributed.all_reduce(mu[label])
+#         torch.distributed.all_reduce(sigma[label])
+#         torch.distributed.all_gather_object(
+#             gathered_features[label], list_features[label]
+#         )
+
+#         gathered_features[label] = torch.cat(gathered_features[label], dim=0)
+#         mu[label] /= len(gathered_features[label])
+#         sigma[label] -= mu[label].ger(mu[label]) * len(gathered_features[label])
+#         sigma[label] /= len(gathered_features[label]) - 1
+
+#     return (
+#         [x.numpy() for x in gathered_features],
+#         [x.cpu().numpy() for x in mu],
+#         [x.cpu().numpy() for x in sigma],
+#     )
 
 
 ####################################################################################################
@@ -192,131 +385,152 @@ def compute_dino_stats(
     prefetch_factor=2,
     device=torch.device("cuda"),
 ):
-    # Rank 0 goes first.
-    if dist.get_rank() != 0:
-        torch.distributed.barrier()
-
-    # Load Dino v2 model.
-    dist.print0("Loading DINO v2 model...")
-    detector_net = classifier.FeatureExtractor(url=image_path).to(device)
-    feature_dim = 768
-    detector_kwargs = {}
-
-    # List images.
-    dist.print0(f'Loading images from "{image_path}"...')
-
-    dataset = ImageFolderDataset(
-        path=image_path,
-        max_size=num_expected,
-        random_seed=seed,
-        use_labels=True,
-    )
-    num_labels = dataset.label_dim
-
-    if num_expected is not None and len(dataset) < num_expected:
-        raise click.ClickException(
-            f"Found {len(dataset)} images, but expected at least {num_expected}"
-        )
-    if len(dataset) < 2:
-        raise click.ClickException(
-            f"Found {len(dataset)} images, but need at least 2 to compute statistics"
-        )
-
-    # Other ranks follow.
-    if dist.get_rank() == 0:
-        torch.distributed.barrier()
-
-    # Divide images into batches.
-    num_batches = (
-        (len(dataset) - 1) // (max_batch_size * dist.get_world_size()) + 1
-    ) * dist.get_world_size()
-    all_batches = torch.arange(len(dataset)).tensor_split(num_batches)
-    rank_batches = all_batches[dist.get_rank() :: dist.get_world_size()]
-
-    data_loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_sampler=rank_batches,
+    return compute_model_stats(
+        model="dino",
+        image_path=image_path,
+        num_expected=num_expected,
+        seed=seed,
+        max_batch_size=max_batch_size,
         num_workers=num_workers,
         prefetch_factor=prefetch_factor,
+        device=device,
     )
 
-    # Accumulate statistics.
-    # Index 0 for the overall statistics.
-    dist.print0(f"Calculating statistics for {len(dataset)} images...")
 
-    mu = [
-        torch.zeros([feature_dim], dtype=torch.float64, device=device)
-        for _ in range(num_labels + 1)
-    ]
-    sigma = [
-        torch.zeros([feature_dim, feature_dim], dtype=torch.float64, device=device)
-        for _ in range(num_labels + 1)
-    ]
-    list_features = [[] for _ in range(num_labels + 1)]
+# def compute_dino_stats(
+#     image_path,
+#     num_expected=None,
+#     seed=0,
+#     max_batch_size=64,
+#     num_workers=3,
+#     prefetch_factor=2,
+#     device=torch.device("cuda"),
+# ):
+#     # Rank 0 goes first.
+#     if dist.get_rank() != 0:
+#         torch.distributed.barrier()
 
-    t0 = time.time()
-    for k, (images, _labels) in enumerate(data_loader):
-        if k == 100:
-            dist.print0(
-                f"Estimated time to finish:"
-                f" {(time.time() - t0) / k * (len(data_loader) - k) / 60:.2f} minutes"
-            )
+#     # Load Dino v2 model.
+#     dist.print0("Loading DINO v2 model...")
+#     detector_net = classifier.FeatureExtractor(url=image_path).to(device)
+#     detector_kwargs = {}
+#     feature_dim = 768
 
-        torch.distributed.barrier()
+#     # List images.
+#     dist.print0(f'Loading images from "{image_path}"...')
 
-        if images.shape[0] == 0:
-            continue
-        if images.shape[1] == 1:
-            images = images.repeat([1, 3, 1, 1])
+#     dataset = ImageFolderDataset(
+#         path=image_path,
+#         max_size=num_expected,
+#         random_seed=seed,
+#         use_labels=True,
+#     )
+#     num_labels = dataset.label_dim
 
-        with torch.no_grad():
-            features = detector_net(images.to(device), **detector_kwargs).to(
-                torch.float64
-            )
-        mu[0] += features.sum(0)
-        sigma[0] += features.T @ features
-        list_features[0].append(features.cpu())
+#     if num_expected is not None and len(dataset) < num_expected:
+#         raise click.ClickException(
+#             f"Found {len(dataset)} images, but expected at least {num_expected}"
+#         )
+#     if len(dataset) < 2:
+#         raise click.ClickException(
+#             f"Found {len(dataset)} images, but need at least 2 to compute statistics"
+#         )
 
-        # Label-wise statistics.
-        # Labels are either a single label or a one-hot encoded vector
-        if _labels.ndim == 1:
-            _labels = _labels.unsqueeze(1)
-        _labels = torch.argmax(_labels, dim=1)
+#     # Other ranks follow.
+#     if dist.get_rank() == 0:
+#         torch.distributed.barrier()
 
-        for label in range(1, num_labels + 1):
-            idx = _labels == label - 1
-            if idx.sum() == 0:
-                continue
-            mu[label] += features[idx].sum(0)
-            sigma[label] += features[idx].T @ features[idx]
-            list_features[label].append(features[idx].cpu())
+#     # Divide images into batches.
+#     num_batches = (
+#         (len(dataset) - 1) // (max_batch_size * dist.get_world_size()) + 1
+#     ) * dist.get_world_size()
+#     all_batches = torch.arange(len(dataset)).tensor_split(num_batches)
+#     rank_batches = all_batches[dist.get_rank() :: dist.get_world_size()]
 
-    for label in range(num_labels + 1):
-        list_features[label] = torch.cat(list_features[label], dim=0)
+#     data_loader = torch.utils.data.DataLoader(
+#         dataset,
+#         batch_sampler=rank_batches,
+#         num_workers=num_workers,
+#         prefetch_factor=prefetch_factor,
+#     )
 
-    gathered_features = [
-        [torch.zeros_like(list_features[i]) for _ in range(dist.get_world_size())]
-        for i in range(num_labels + 1)
-    ]
+#     # Accumulate statistics.
+#     # Index 0 for the overall statistics.
+#     dist.print0(f"Calculating statistics for {len(dataset)} images...")
 
-    # Calculate grand totals.
-    for label in range(num_labels + 1):
-        torch.distributed.all_reduce(mu[label])
-        torch.distributed.all_reduce(sigma[label])
-        torch.distributed.all_gather_object(
-            gathered_features[label], list_features[label]
-        )
+#     mu = [
+#         torch.zeros([feature_dim], dtype=torch.float64, device=device)
+#         for _ in range(num_labels + 1)
+#     ]
+#     sigma = [
+#         torch.zeros([feature_dim, feature_dim], dtype=torch.float64, device=device)
+#         for _ in range(num_labels + 1)
+#     ]
+#     list_features = [[] for _ in range(num_labels + 1)]
 
-        gathered_features[label] = torch.cat(gathered_features[label], dim=0)
-        mu[label] /= len(gathered_features[label])
-        sigma[label] -= mu[label].ger(mu[label]) * len(gathered_features[label])
-        sigma[label] /= len(gathered_features[label]) - 1
+#     t0 = time.time()
+#     for k, (images, _labels) in enumerate(data_loader):
+#         if k == 100:
+#             dist.print0(
+#                 f"Estimated time to finish:"
+#                 f" {(time.time() - t0) / k * (len(data_loader) - k) / 60:.2f} minutes"
+#             )
 
-    return (
-        [x.numpy() for x in gathered_features],
-        [x.cpu().numpy() for x in mu],
-        [x.cpu().numpy() for x in sigma],
-    )
+#         torch.distributed.barrier()
+
+#         if images.shape[0] == 0:
+#             continue
+#         if images.shape[1] == 1:
+#             images = images.repeat([1, 3, 1, 1])
+
+#         with torch.no_grad():
+#             features = detector_net(images.to(device), **detector_kwargs).to(
+#                 torch.float64
+#             )
+#         mu[0] += features.sum(0)
+#         sigma[0] += features.T @ features
+#         list_features[0].append(features.cpu())
+
+#         # Label-wise statistics.
+#         # Labels are either a single label or a one-hot encoded vector
+#         if _labels.ndim == 1:
+#             _labels = _labels.unsqueeze(1)
+#         _labels = torch.argmax(_labels, dim=1)
+
+#         for label in range(1, num_labels + 1):
+#             idx = _labels == label - 1
+#             if idx.sum() == 0:
+#                 continue
+#             mu[label] += features[idx].sum(0)
+#             sigma[label] += features[idx].T @ features[idx]
+#             list_features[label].append(features[idx].cpu())
+
+#     for label in range(num_labels + 1):
+#         list_features[label] = torch.cat(list_features[label], dim=0)
+
+#     gathered_features = [
+#         [torch.zeros_like(list_features[i]) for _ in range(dist.get_world_size())]
+#         for i in range(num_labels + 1)
+#     ]
+
+#     # Calculate grand totals.
+#     for label in range(num_labels + 1):
+#         torch.distributed.all_reduce(mu[label])
+#         torch.distributed.all_reduce(sigma[label])
+#         torch.distributed.all_gather_object(
+#             gathered_features[label], list_features[label]
+#         )
+
+#         gathered_features[label] = torch.cat(gathered_features[label], dim=0)
+#         mu[label] /= len(gathered_features[label])
+#         sigma[label] -= mu[label].ger(mu[label]) * len(gathered_features[label])
+#         sigma[label] /= len(gathered_features[label]) - 1
+
+#     return (
+#         [x.numpy() for x in gathered_features],
+#         [x.cpu().numpy() for x in mu],
+#         [x.cpu().numpy() for x in sigma],
+#     )
 
 
 ####################################################################################################
@@ -424,19 +638,13 @@ def inception_ref(data_path, dst_dir, batch_size):
     click.echo("Computing reference Inception features and stats.")
 
     data_path = Path(data_path).expanduser()
-    data_dir = data_path.parent
-    dataset_name = data_path.name.split(".")[0]
-    if dataset_name == "dataset":
-        dataset_name = data_dir.name
+    dataset_name = extract_dataset_name(data_path)
 
-    if dst_dir is None:
-        dst_dir = data_dir / f"{dataset_name}-{FLAG_INCEPTION_REF_PATH}"
-    else:
-        dst_dir = Path(dst_dir).expanduser()
-    dst_dir.mkdir(parents=True, exist_ok=True)
-
-    data_path = str(data_path)
-    dst_dir = str(dst_dir)
+    outdir = resolve_output(
+        dst_dir,
+        subdir=FLAG_INCEPTION_REF_PATH,
+        fname=None,
+    )
 
     torch.multiprocessing.set_start_method("spawn")
     dist.init()
@@ -452,16 +660,16 @@ def inception_ref(data_path, dst_dir, batch_size):
             name = f"{dataset_name}-{label - 1}" if label > 0 else dataset_name
             dist.print0(f"Saving dataset ref Inception stats for {name}...")
 
-            if not os.path.dirname(dst_dir):
-                os.makedirs(dst_dir, parents=True, exist_ok=True)
+            if not os.path.dirname(outdir):
+                os.makedirs(outdir, parents=True, exist_ok=True)
 
             np.savez(
-                os.path.join(dst_dir, f"{name}.npz"),
+                os.path.join(outdir, f"{name}.npz"),
                 inception_feats=inception_feats[label],
                 inception_mus=inception_mus[label],
                 inception_sigmas=inception_sigmas[label],
             )
-            dist.print0(f"Saved dataset ref Inception stats in {dst_dir}/{name}.npz")
+            dist.print0(f"Saved dataset ref Inception stats in {outdir}/{name}.npz")
 
     torch.distributed.barrier()
     dist.print0("Done.")
@@ -502,20 +710,14 @@ def dino_ref(data_path, dst_dir, batch_size):
 
     click.echo("Computing reference DINO features and stats.")
 
-    data_path = Path(data_path).expanduser()
-    data_dir = data_path.parent
-    dataset_name = data_path.name.split(".")[0]
-    if dataset_name == "dataset":
-        dataset_name = data_dir.name
+    data_path = Path(data_path).expanduser().as_posix()
+    dataset_name = extract_dataset_name(data_path)
 
-    if dst_dir is None:
-        dst_dir = data_dir / f"{dataset_name}-{FLAG_DINO_REF_PATH}"
-    else:
-        dst_dir = Path(dst_dir).expanduser()
-    dst_dir.mkdir(parents=True, exist_ok=True)
-
-    data_path = str(data_path)
-    dst_dir = str(dst_dir)
+    outdir = resolve_output(
+        dst_dir,
+        subdir=FLAG_DINO_REF_PATH,
+        fname=None,
+    )
 
     torch.multiprocessing.set_start_method("spawn")
     dist.init()
@@ -531,16 +733,16 @@ def dino_ref(data_path, dst_dir, batch_size):
             name = f"{dataset_name}-{label - 1}" if label > 0 else dataset_name
             dist.print0(f"Saving dataset ref DINO stats for {name}...")
 
-            if not os.path.dirname(dst_dir):
-                os.makedirs(dst_dir, parents=True, exist_ok=True)
+            if not os.path.dirname(outdir):
+                os.makedirs(outdir, parents=True, exist_ok=True)
 
             np.savez(
-                os.path.join(dst_dir, f"{name}.npz"),
+                os.path.join(outdir, f"{name}.npz"),
                 dino_feats=dino_feats[label],
                 dino_mus=dino_mus[label],
                 dino_sigmas=dino_sigmas[label],
             )
-            dist.print0(f"Saved dataset ref DINO stats in {dst_dir}/{name}.npz")
+            dist.print0(f"Saved dataset ref DINO stats in {outdir}/{name}.npz")
 
     torch.distributed.barrier()
     dist.print0("Done.")
@@ -559,6 +761,14 @@ def dino_ref(data_path, dst_dir, batch_size):
     type=str,
     required=True,
     help="Path to generated images",
+)
+@click.option(
+    "--dst-dir",
+    "dst_dir",
+    metavar="DIR",
+    type=str,
+    required=True,
+    help="Path to save the output",
 )
 # @click.option(
 #     "--num",
@@ -593,7 +803,7 @@ def dino_ref(data_path, dst_dir, batch_size):
     show_default=True,
     help="Reset cached features (if previously calculated with different settings)",
 )
-def inception_stats(img_path, seed, batch_size, reset_inception):
+def inception_stats(img_path, dst_dir, seed, batch_size, reset_inception):
     """Compute and cache Inception features and statistics."""
 
     click.echo(f"Computing inception feats and stats for: {img_path}...")
@@ -604,11 +814,16 @@ def inception_stats(img_path, seed, batch_size, reset_inception):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    out_path = os.path.dirname(img_path)
-    inception_file = os.path.join(out_path, INCEPTION_STATS_FILE)
+    dataset_name = extract_dataset_name(img_path, depth=2)
 
-    if os.path.exists(inception_file) and not reset_inception:
-        dist.print0(f"Using cached Inception stats from {inception_file}")
+    output = resolve_output(
+        dst_dir,
+        subdir=FLAG_INCEPTION_STATS_PATH,
+        fname=f"{dataset_name}.npy",
+    )
+
+    if os.path.exists(output) and not reset_inception:
+        dist.print0(f"Using cached Inception stats from {output}")
         return
 
     inception_feats, inception_mus, inception_sigmas = compute_inception_stats(
@@ -619,14 +834,14 @@ def inception_stats(img_path, seed, batch_size, reset_inception):
 
     if dist.get_rank() == 0:
         np.save(
-            inception_file,
+            output,
             {
                 "inception_feats": inception_feats,
                 "inception_mus": inception_mus,
                 "inception_sigmas": inception_sigmas,
             },
         )
-        dist.print0(f"Saved Inception stats to {inception_file}")
+        dist.print0(f"Saved Inception stats to {output}")
 
     torch.distributed.barrier()
 
@@ -644,6 +859,14 @@ def inception_stats(img_path, seed, batch_size, reset_inception):
     type=str,
     required=True,
     help="Path to generated images",
+)
+@click.option(
+    "--dst-dir",
+    "dst_dir",
+    metavar="DIR",
+    type=str,
+    required=True,
+    help="Path to save the output",
 )
 # @click.option(
 #     "--num",
@@ -678,7 +901,7 @@ def inception_stats(img_path, seed, batch_size, reset_inception):
     show_default=True,
     help="Reset cached features (if previously calculated with different settings)",
 )
-def dino_stats(img_path, seed, batch_size, reset):
+def dino_stats(img_path, dst_dir, seed, batch_size, reset):
     """Compute and cache DINO features and statistics."""
 
     click.echo(f"Computing DINO feats and stats for: {img_path}...")
@@ -689,11 +912,16 @@ def dino_stats(img_path, seed, batch_size, reset):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    out_path = os.path.dirname(img_path)
-    dino_file = os.path.join(out_path, DINO_STATS_FILE)
+    dataset_name = extract_dataset_name(img_path, depth=2)
 
-    if os.path.exists(dino_file) and not reset:
-        dist.print0(f"Using cached DINO stats from {dino_file}")
+    output = resolve_output(
+        dst_dir,
+        subdir=FLAG_DINO_STATS_PATH,
+        fname=f"{dataset_name}.npy",
+    )
+
+    if os.path.exists(output) and not reset:
+        dist.print0(f"Using cached DINO stats from {output}")
         return
 
     dino_feats, dino_mus, dino_sigmas = compute_dino_stats(
@@ -704,14 +932,14 @@ def dino_stats(img_path, seed, batch_size, reset):
 
     if dist.get_rank() == 0:
         np.save(
-            dino_file,
+            output,
             {
                 "dino_feats": dino_feats,
                 "dino_mus": dino_mus,
                 "dino_sigmas": dino_sigmas,
             },
         )
-        dist.print0(f"Saved DINO stats to {dino_file}")
+        dist.print0(f"Saved DINO stats to {output}")
 
     torch.distributed.barrier()
 
@@ -745,12 +973,36 @@ def dino_stats(img_path, seed, batch_size, reset):
     help="Dataset reference Inception statistics (required for FID and PRDC)",
 )
 @click.option(
+    "--inception-stats",
+    "inception_stats",
+    metavar="NPY",
+    type=str,
+    required=False,
+    help="Dataset Inception statistics (required for FID and PRDC)",
+)
+@click.option(
     "--dino-ref",
     "dino_ref",
     metavar="NPZ|URL",
     type=str,
     required=False,
     help="Dataset reference DINO statistics (required for PRCD-DINO)",
+)
+@click.option(
+    "--dino-stats",
+    "dino_stats",
+    metavar="NPY",
+    type=str,
+    required=False,
+    help="Dataset DINO statistics (required for PRCD-DINO)",
+)
+@click.option(
+    "--dst-dir",
+    "dst_dir",
+    metavar="DIR",
+    type=str,
+    required=False,
+    help="Directory for saving evaluation results.",
 )
 @click.option(
     "--seed",
@@ -833,7 +1085,10 @@ def eval(
     img_path,
     metrics,
     inception_ref,
+    inception_stats,
     dino_ref,
+    dino_stats,
+    dst_dir,
     seed,
     # Options for PCA
     pca,
@@ -862,9 +1117,24 @@ def eval(
         )
 
     # Checking files.
-    data_path = Path(img_path).parent
-    inception_stats = data_path / INCEPTION_STATS_FILE
-    dino_stats = data_path / DINO_STATS_FILE
+    data_dir = Path(img_path).parent
+    if not inception_stats:
+        inception_stats = data_dir / INCEPTION_STATS_FILE
+    if not dino_stats:
+        dino_stats = data_dir / DINO_STATS_FILE
+
+    if dst_dir is not None:
+        out_path = resolve_output(
+            dst_dir,
+            subdir="eval",
+            fname=extract_dataset_name(img_path, depth=2) + ".json",
+        )
+    else:
+        out_path = resolve_output(
+            data_dir,
+            subdir=None,
+            fname="evaluation.jsonl",
+        )
 
     if set(metrics) & {"fid", "toppr"}:
         if not os.path.exists(inception_ref):
@@ -903,6 +1173,8 @@ def eval(
         while os.path.exists(inception_ref.split(".")[0] + f"-{label}.npz"):
             ref_files.append(inception_ref.split(".")[0] + f"-{label}.npz")
             label += 1
+
+        dist.print0(f"Found {len(ref_files)} reference files: \n {ref_files}")
 
         inception_refs = []
         for ref_file in ref_files:
@@ -1224,7 +1496,7 @@ def eval(
                         f"feats_ref shape: {feats_ref.shape}, feats shape: {feats.shape}, mean feats_ref: {np.mean(feats_ref)}, mean feats: {np.mean(feats)}"
                     )
 
-                    APPLY_PCA_TO_DINO = False
+                    APPLY_PCA_TO_DINO = True
 
                     # if pca:
                     if APPLY_PCA_TO_DINO:
@@ -1287,7 +1559,7 @@ def eval(
                 )
 
     if dist.get_rank() == 0:
-        with open(os.path.join(data_path, "evaluation.jsonl"), "w") as file:
+        with open(out_path, "w") as file:
             json.dump(data, file, indent=4)
 
     torch.distributed.barrier()

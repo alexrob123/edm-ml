@@ -329,32 +329,29 @@ def can_end(
 # ----------------------------------------------------------------------------
 
 
-# fmt: off
 @click.command()
-@click.option("--network", "network_pkl",           help="Network pickle filename", metavar="PATH|URL",                         type=str, required=True)
+@click.option("--network", "network_pkl",           help="Network pickle filename", metavar="PATH|URL",                         type=str, required=True)  # fmt: skip
 # Storage options
-@click.option("--outdir",                           help="Where to save the output images", metavar="DIR",                      type=str)
-@click.option("--subdirs",                          help="Create subdirectory for every 1000 samples",                          is_flag=True, default=True)
-@click.option("--no-zip",                           help="Compress the output directory",                                       is_flag=True, default=False)
+@click.option("--outdir",                           help="Where to save the output images", metavar="DIR",                      type=str)  # fmt: skip
+@click.option("--subdirs",                          help="Create subdirectory for every 1000 samples",                          is_flag=True, default=True)  # fmt: skip
+@click.option("--no-zip",                           help="Compress the output directory",                                       is_flag=True, default=False)  # fmt: skip
 # Number of sample and distribution
-@click.option("--num-samples",                      help="Number of samples", metavar="INT",                                    type=click.IntRange(min=0), default=50000, show_default=True)
-@click.option("--min-per-class", "min_per_class",   help="Ensure at least samples per class across all ranks", metavar="INT",   type=click.IntRange(min=0), default=20000, show_default=True)
-@click.option("--target-prior", "target_prior_str", help="Target class prior as '20-80' or '30-10-60' (will be renormalized).", type=str, default=None)
-@click.option("--class", "class_idx",               help="Class label  [default: random]", metavar="INT",                       type=click.IntRange(min=0), default=None)
-@click.option("--multihot",                         help="Allow multiple hot labels per sample (for conditional models only)",  is_flag=True, default=False)
+@click.option("--num-samples",                      help="Number of samples", metavar="INT",                                    type=click.IntRange(min=0), default=50000, show_default=True)  # fmt: skip
+@click.option("--min-per-class", "min_per_class",   help="Ensure at least samples per class across all ranks", metavar="INT",   type=click.IntRange(min=0), default=20000, show_default=True)  # fmt: skip
+@click.option("--target-prior", "target_prior_str", help="Target class prior as '20-80' or '30-10-60' (will be renormalized).", type=str, default=None)  # fmt: skip
+@click.option("--class", "class_idx",               help="Class label  [default: random]", metavar="INT",                       type=click.IntRange(min=0), default=None)  # fmt: skip
+@click.option("--multihot",                         help="Allow multiple hot labels per sample (for conditional models only)",  is_flag=True, default=False)  # fmt: skip
 # Sampler options
-@click.option("--steps", "num_steps",               help="Number of sampling steps", metavar="INT",                             type=click.IntRange(min=1), default=18, show_default=True)
-@click.option("--sigma_min",                        help="Lowest noise level  [default: varies]", metavar="FLOAT",              type=click.FloatRange(min=0.01, min_open=True))
-@click.option("--sigma_max",                        help="Highest noise level  [default: varies]", metavar="FLOAT",             type=click.FloatRange(min=0, min_open=True))
-@click.option("--rho",                              help="Time step exponent", metavar="FLOAT",                                 type=click.FloatRange(min=0, min_open=True), default=7, show_default=True)
-@click.option("--S_churn", "S_churn",               help="Stochasticity strength", metavar="FLOAT",                             type=click.FloatRange(min=0), default=0, show_default=True)
-@click.option("--S_min", "S_min",                   help="Stoch. min noise level", metavar="FLOAT",                             type=click.FloatRange(min=0), default=0, show_default=True)
-@click.option("--S_max", "S_max",                   help="Stoch. max noise level", metavar="FLOAT",                             type=click.FloatRange(min=0), default="inf", show_default=True)
-@click.option("--S_noise", "S_noise",               help="Stoch. noise inflation", metavar="FLOAT",                             type=float, default=1, show_default=True)
-@click.option("--batch", "max_batch_size",          help="Maximum batch size", metavar="INT",                                   type=click.IntRange(min=1), default=128, show_default=True)
-@click.option("--clf-uncond",                       help="Infer class labels from classifier for unconditional generation",     is_flag=True, default=False)
-# fmt: on
-
+@click.option("--steps", "num_steps",               help="Number of sampling steps", metavar="INT",                             type=click.IntRange(min=1), default=18, show_default=True)  # fmt: skip
+@click.option("--sigma_min",                        help="Lowest noise level  [default: varies]", metavar="FLOAT",              type=click.FloatRange(min=0.01, min_open=True))  # fmt: skip
+@click.option("--sigma_max",                        help="Highest noise level  [default: varies]", metavar="FLOAT",             type=click.FloatRange(min=0, min_open=True))  # fmt: skip
+@click.option("--rho",                              help="Time step exponent", metavar="FLOAT",                                 type=click.FloatRange(min=0, min_open=True), default=7, show_default=True)  # fmt: skip
+@click.option("--S_churn", "S_churn",               help="Stochasticity strength", metavar="FLOAT",                             type=click.FloatRange(min=0), default=0, show_default=True)  # fmt: skip
+@click.option("--S_min", "S_min",                   help="Stoch. min noise level", metavar="FLOAT",                             type=click.FloatRange(min=0), default=0, show_default=True)  # fmt: skip
+@click.option("--S_max", "S_max",                   help="Stoch. max noise level", metavar="FLOAT",                             type=click.FloatRange(min=0), default="inf", show_default=True)  # fmt: skip
+@click.option("--S_noise", "S_noise",               help="Stoch. noise inflation", metavar="FLOAT",                             type=float, default=1, show_default=True)  # fmt: skip
+@click.option("--batch", "max_batch_size",          help="Maximum batch size", metavar="INT",                                   type=click.IntRange(min=1), default=128, show_default=True)  # fmt: skip
+@click.option("--clf-uncond",                       help="Infer class labels from classifier for unconditional generation",     is_flag=True, default=False)  # fmt: skip
 def main(
     network_pkl,
     outdir,
@@ -503,6 +500,7 @@ def main(
         gen_per_class = torch.zeros(net_label_dim, device=device, dtype=torch.long)
     total_generated = 0
     id = 0
+    local_done = False
 
     # --- Loop over batches ---
 
@@ -517,6 +515,14 @@ def main(
 
     # While loop until we have accepted enough samples for this rank
     while True:
+        if local_done:
+            done_tensor = torch.tensor(1, device=device, dtype=torch.int32)
+            torch.distributed.all_reduce(done_tensor, op=torch.distributed.ReduceOp.SUM)
+            if int(done_tensor.item()) == int(world_size):
+                break
+            time.sleep(0.05)
+            continue
+
         batch_seeds = seed_batch(max_batch_size, id, dist.get_rank())
         rnd = StackedRandomGenerator(device, batch_seeds)
         latents = rnd.randn(
@@ -542,7 +548,11 @@ def main(
             key: value for key, value in sampler_kwargs.items() if value is not None
         }
         images = edm_sampler(
-            net, latents, labels, randn_like=rnd.randn_like, **sampler_kwargs
+            net,
+            latents,
+            labels,
+            randn_like=rnd.randn_like,
+            **sampler_kwargs,
         )
 
         # Save images.
@@ -658,15 +668,14 @@ def main(
         # If under regulation, stop when local per-class targets are reached
         if regulation_started and local_target_per_class is not None:
             if bool((gen_per_class >= local_target_per_class).all().item()):
-                break
+                local_done = True
 
         # Convert labels to numpy for saving
         labels_np = labels.cpu().numpy() if multihot else labels.view(-1).cpu().numpy()
 
         # If nothing accepted this round, continue to try again
         if len(labels_np) == 0:
-            id += 1
-            continue
+            pass
 
         # Ensure seeds are plain ints for formatting
         if torch.is_tensor(batch_seeds):
@@ -722,7 +731,7 @@ def main(
                 total_generated,
                 target_prior,
             ):
-                break
+                local_done = True
 
         # Optional: throttled progress print (rank 0 only)
         iter_idx += 1
@@ -730,14 +739,13 @@ def main(
 
         log_sec_multiplier = 1 if rank == 0 else 100
         log_iters_multiplier = 1 if rank == 0 else 10
-        should_log = (
-            (now - last_log_time) >= (LOG_SECS * log_sec_multiplier) 
-            or (iter_idx % (LOG_ITERS * log_iters_multiplier) == 0)
+        should_log = (now - last_log_time) >= (LOG_SECS * log_sec_multiplier) or (
+            iter_idx % (LOG_ITERS * log_iters_multiplier) == 0
         )
         if should_log:
-        # if (rank == 0) and (
-        #     (now - last_log_time) >= LOG_SECS or (iter_idx % LOG_ITERS == 0)
-        # ):
+            # if (rank == 0) and (
+            #     (now - last_log_time) >= LOG_SECS or (iter_idx % LOG_ITERS == 0)
+            # ):
             last_log_time = now
             try:
                 mem_used = (
@@ -767,6 +775,15 @@ def main(
                 f"| counts {per_class_counts_str} "
                 f"| {mem_str}{extra}"
             )
+
+        done_tensor = torch.tensor(
+            1 if local_done else 0,
+            device=device,
+            dtype=torch.int32,
+        )
+        torch.distributed.all_reduce(done_tensor, op=torch.distributed.ReduceOp.SUM)
+        if int(done_tensor.item()) == int(world_size):
+            break
 
         id += 1
     print(f"[rank {rank}] accepted {total_generated} images")
