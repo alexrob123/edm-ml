@@ -12,6 +12,7 @@
 import json
 import logging
 import os
+import warnings
 import zipfile
 
 import numpy as np
@@ -184,8 +185,21 @@ class Dataset(torch.utils.data.Dataset):
         return any(x != 0 for x in self.label_shape)
 
     @property
+    def has_hot_labels(self):
+        return self._get_raw_labels().dtype == np.float32
+
+    @property
+    def is_multilabel(self):
+        raw_labels = self._get_raw_labels()
+        return self.has_hot_labels and np.any(raw_labels.sum(axis=1) > 1)
+
+    @property
     def has_onehot_labels(self):
-        return self._get_raw_labels().dtype == np.int64
+        return self.has_hot_labels and not self.is_multilabel
+
+    @property
+    def has_multihot_labels(self):
+        return self.has_hot_labels and self.is_multilabel
 
 
 # ----------------------------------------------------------------------------
