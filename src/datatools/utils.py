@@ -10,14 +10,21 @@ import torch
 # ----------------------------------------------------------------------------------------------------
 
 
-def extract_dataset_name(path):
+def extract_dataset_name(path, depth=1, suffix=None):
     path = Path(path).expanduser()
 
     if path.is_dir():
         name = path.name
-    elif path.suffix == ".zip":
-        if "dataset" in path.name or "generated_images" in path.name:
-            name = path.parent.name
+    elif (
+        path.suffix == ".zip"
+        or path.suffix == ".json"
+        or (suffix is not None and path.suffix == suffix)
+    ):
+        flag_dataset = "dataset" in path.name or "generated_images" in path.name
+        flag_metrics = "metrics" in path.name or "eval" in path.name
+        if flag_dataset or flag_metrics:
+            parents = path.parents[:depth]
+            name = "-".join(p.name for p in parents[::-1])
         else:
             name = path.stem
     else:
@@ -27,10 +34,69 @@ def extract_dataset_name(path):
     return name.lower()
 
 
+def resolve_output(target, subdir=None, fname=None):
+    target = Path(target).expanduser()
+
+    # Treat paths without suffix as directories
+    if target.suffix == "":
+        outpath = target
+        if subdir is not None:
+            outpath = outpath / subdir
+
+        outpath.mkdir(parents=True, exist_ok=True)
+
+        if fname is not None:
+            outpath = outpath / fname
+
+        return outpath.as_posix()
+
+    # File case
+    if fname is None:
+        raise ValueError("If target is a file, a default filename must be provided")
+
+    if target.suffix != Path(fname).suffix:
+        raise ValueError("Provided target extension does not match default extension")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    return target.as_posix()
+
+
+# ----------------------------------------------------------------------------------------------------
+
+
 def read_json(path):
     with open(path, "r") as f:
         data = json.load(f)
     return data
+
+
+def read_dataset_meta(path):
+    path = Path(path).expanduser()
+
+    if path.is_dir():
+        with open(Path(path) / "dataset.json", "r") as j:
+            data = json.load(j)
+    elif path.suffix == ".zip":
+        with ZipFile(path) as z:
+            with z.open("dataset.json", "r") as j:
+                data = json.load(j)
+    elif path.suffix == ".json":
+        with open(path, "r") as j:
+            data = json.load(j)
+    else:
+        raise ValueError(f"Unsupported data path: {path}")
+
+    labels = [x[1] for x in data["labels"]]
+    if isinstance(labels[0], (list, tuple)):
+        labels = [tuple(int(v) for v in label) for label in labels]
+
+    result = {"labels": labels}
+    for key in ("labelsets", "labelspace"):
+        if (value := data.get(key)) is not None:
+            result[key] = value
+
+    return result
 
 
 def zip_meta(path, fname="dataset.json"):

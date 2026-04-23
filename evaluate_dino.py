@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from datatools.multilabel import BATCH_PROCESSING, PRED_PROCESSING
-from datatools.utils import make_json_serializable
+from datatools.utils import extract_dataset_name, make_json_serializable, resolve_output
 from evaluation.supervised import compute_multiclass_metrics, compute_multihot_metrics
 from training import dataset
 from training.classifier import prepare_dino_model
@@ -92,11 +92,11 @@ DINO_METRICS_FNAME = "dino_metrics.jsonl"
 @click.option("--method", "-mll",      help="MLL method",                                      type=click.Choice(["br", "lp"]), required=True)
 @click.option("--model", "-m",         help="Path to the model checkpoint.", metavar="PTH",    type=click.Path(exists=True), required=True)
 @click.option("--batch", "batch_size", help="Batch size",                                      type=int, default=256, show_default=True)
-@click.option("--out", "-o",           help="Path for saving evaluation", metavar="DIR|JSONL", type=click.Path(exists=True), required=False)
+@click.option("--out-path", "-o",      help="Path for saving evaluation", metavar="DIR|JSONL", type=click.Path(exists=True), required=False)
 
 # fmt: on
 
-def main(data, num_labels, method, model, batch_size, out):
+def main(data, num_labels, method, model, batch_size, out_path):
     """Evaluate Fine-tuned DINOv2 model on generated images and compute metrics"""
 
     # Config
@@ -106,17 +106,12 @@ def main(data, num_labels, method, model, batch_size, out):
     assert data_path.exists(), f"Data path {data_path} does not exist."
     assert model_path.exists(), f"Model path {model_path} does not exist."
 
-    if out is None: 
+    dataset_name = extract_dataset_name(data_path, depth=2)
+
+    if out_path is None: 
         output_path = data_path.parent / DINO_METRICS_FNAME
     else :
-        output_path = Path(out).expanduser()
-    if output_path.is_dir():
-        output_path.mkdir(parents=True, exist_ok=True)
-        output_path = output_path / DINO_METRICS_FNAME
-    elif output_path.suffix and output_path.suffix == ".jsonl":
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-    else:
-        raise ValueError(f"Invalid output path: {out}")
+        output_path = resolve_output(out_path, subdir=dataset_name, fname=DINO_METRICS_FNAME)
     
     logger.info(f"Data path: {data_path}")
     logger.info(f"Model path: {model_path}")
