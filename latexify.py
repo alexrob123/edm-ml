@@ -9,7 +9,7 @@ import click
 import pandas as pd
 
 from datatools.multilabel import read_lp_dataset_meta
-from datatools.utils import extract_dataset_name, zip_labels
+from datatools.utils import extract_dataset_name, read_dataset_meta, zip_labels
 
 logging.basicConfig(
     format="[%(levelname)s] %(name)s: %(message)s",
@@ -40,7 +40,11 @@ def compare_generations(fname, conditional_fnames):
 
 
 def build_label_df(labels, **kwargs):
-    counts = dict(sorted(Counter(labels).items()))
+    counts = (
+        dict(sorted(Counter(tuple(row) for row in labels).items(), key=lambda x: x[0]))
+        if not isinstance(labels[0], int)
+        else dict(sorted(Counter(labels).items()))
+    )
 
     df = pd.DataFrame(counts.items(), columns=["Label", "Count"])
     df = df.set_index("Label")
@@ -48,7 +52,9 @@ def build_label_df(labels, **kwargs):
     df["Proportion"] = df["Count"] / df["Count"].sum() * 100
 
     for col_name, mapping in kwargs.items():
-        df[col_name] = pd.Series(mapping)
+        if mapping is not None:
+            assert len(mapping) == len(df), f"Length mismatch for {col_name}."
+            df[col_name] = pd.Series(mapping)
 
     return df
 
@@ -96,7 +102,7 @@ def merge_dataframes_with_duplicate_handling(dataframes, names=None):
     return merged
 
 
-def metadata_versus_df(data_path, gen_path, method):
+def metadata_versus_df(data_path, gen_path):
 
     data_path = Path(data_path).expanduser()
     gen_path = Path(gen_path).expanduser()
@@ -110,19 +116,20 @@ def metadata_versus_df(data_path, gen_path, method):
     data_name = extract_dataset_name(data_path)
     gen_name = extract_dataset_name(gen_path)
 
-    if method == "lp":
-        logger.info("Reading Label Powerset dataset meta.")
+    data_meta = read_dataset_meta(data_path)
+    gen_meta = read_dataset_meta(gen_path)
 
-        data_meta = read_lp_dataset_meta(data_path)
-        data_labels_df = build_label_df(
-            data_meta["labels"],
-            Labelset={i: ls for i, ls in enumerate(data_meta["labelsets"])},
-        )
-    else:
-        raise NotImplementedError(f"ML method {method} not supported.")
+    data_labels_df = build_label_df(
+        data_meta["labels"],
+        Labelset=data_meta.get("labelsets", None),
+    )
+    gen_labels_df = build_label_df(
+        gen_meta["labels"],
+        Labelset=gen_meta.get("labelsets", None),
+    )
 
-    gen_labels = zip_labels(gen_path)
-    gen_labels_df = build_label_df(gen_labels)
+    print(data_labels_df)  # FIX
+    print(gen_labels_df)  # FIX
 
     metadata_df = [data_labels_df, gen_labels_df]
     metadata_source = ["original", "generated"]
@@ -130,7 +137,19 @@ def metadata_versus_df(data_path, gen_path, method):
     merged_df = merge_dataframes_with_duplicate_handling(metadata_df, metadata_source)
     merged_df.index.name = "Label"
 
-    return merged_df, f"meta_{data_name}_{gen_name}"
+    print(merged_df)  # FIX
+
+    # Signed deltas: generated minus original.
+    # if {"o._Count", "g._Count"}.issubset(merged_df.columns):
+    #     merged_df["delta_count"] = merged_df["g._Count"] - merged_df["o._Count"]
+    if {"o._Proportion", "g._Proportion"}.issubset(merged_df.columns):
+        merged_df[r"$\Delta$ Proportion (\%)"] = (
+            (merged_df["g._Proportion"] - merged_df["o._Proportion"])
+            / merged_df["o._Proportion"]
+            * 100
+        )
+
+    return merged_df, f"meta-{data_name}-{gen_name}"
 
 
 ####################################################################################################
@@ -208,7 +227,7 @@ def format_colnames(df: pd.DataFrame) -> pd.DataFrame:
 ####################################################################################################
 
 
-def save_latex_table(df: pd.DataFrame, out_dir: str | Path, fname: str, **kwargs):
+def save_latex_table(df: pd.DataFrame, outdir: str | Path, fname: str, **kwargs):
     """
     Save a DataFrame as a LaTeX table.
 
@@ -216,7 +235,7 @@ def save_latex_table(df: pd.DataFrame, out_dir: str | Path, fname: str, **kwargs
     ----------
     df : pd.DataFrame
         The DataFrame to save.
-    out_dir : str | Path
+    outdir : str | Path
         Directory where the LaTeX file will be saved.
     fname : str
         Name of the LaTeX file (without extension).
@@ -224,10 +243,10 @@ def save_latex_table(df: pd.DataFrame, out_dir: str | Path, fname: str, **kwargs
     logger.info("Generating LaTeX table for DataFrame:")
     print(df)
 
-    out_dir = Path(out_dir).expanduser()
-    out_dir.mkdir(parents=True, exist_ok=True)
+    outdir = Path(outdir).expanduser()
+    outdir.mkdir(parents=True, exist_ok=True)
 
-    out = out_dir / f"{fname}.tex"
+    out = outdir / f"{fname}.tex"
 
     styler = df.style.format(decimal=".", thousands=",", precision=3, **kwargs)
     latex = styler.to_latex(hrules=True)
@@ -264,78 +283,16 @@ def main():
     """
 
 
-# @click.command()
-# @click.option(
-#     "-d",
-#     "--data",
-#     "--data-path",
-#     "data_path",
-#     type=click.Path(exists=True),
-#     metavar="DIR|ZIP",
-#     multiple=True,
-#     help="Path to the original dataset.",
-# )
-# @click.option(
-#     "--num-labels",
-#     "num_labels",
-#     type=int,
-#     default=4,
-#     help="Number of labels in the dataset.",
-# )
-# @click.option(
-#     "--ml-method",
-#     type=click.Choice(["br", "lp"]),
-#     required=False,
-#     help="Method used for fine-tuning the DINOv2 model (Binary Relevance or Label Powerset).",
-# )
-# @click.option(
-#     "--output-path",
-#     type=click.Path(exists=True),
-#     default="./outputs/latex/",
-#     help="Path to save the generated LaTeX tables.",
-# )
-
 ####################################################################################################
 # meta-vs
 ####################################################################################################
 
 
 @main.command()
-@click.option(
-    "-d",
-    "--data",
-    "--data-path",
-    "data_path",
-    type=click.Path(exists=True),
-    metavar="DIR|ZIP",
-    help="Path to the original dataset (directory or zip file).",
-)
-@click.option(
-    "-g",
-    "--gen",
-    "--gen-path",
-    "gen_path",
-    type=click.Path(exists=True),
-    metavar="DIR|ZIP",
-    help="Path to the generated dataset (directory or zip file).",
-)
-@click.option(
-    "-m",
-    "--method",
-    type=click.Choice(["br", "lp"]),
-    required=False,
-    help="Method used for fine-tuning the DINOv2 model (Binary Relevance or Label Powerset).",
-)
-@click.option(
-    "-o",
-    "--out",
-    "--output-path",
-    "output_path",
-    type=click.Path(exists=True),
-    default="./outputs/latex/",
-    help="Path to save the generated LaTeX tables.",
-)
-def meta_vs(data_path, gen_path, method, output_path):
+@click.option("--data", "-d",   help="Path to the original dataset (directory or zip file).", metavar="DIR|ZIP",  type=click.Path(exists=True))  # fmt: skip
+@click.option("--gen", "-g",    help="Path to the generated dataset (directory or zip file).", metavar="DIR|ZIP", type=click.Path(exists=True))  # fmt: skip
+@click.option("--outdir", "-o", help="Path to save the generated LaTeX tables.", metavar="DIR",                   type=click.Path(), default="out-latexify")  # fmt: skip
+def meta_vs(data, gen, outdir):
     """
     Compare the original dataset with the generated one in terms of label distribution.
 
@@ -346,13 +303,14 @@ def meta_vs(data_path, gen_path, method, output_path):
         output_path (str | Path): Path to save the generated LaTeX tables.
     """
 
-    df, name = metadata_versus_df(data_path, gen_path, method)
+    df, name = metadata_versus_df(data, gen)
     df = format_mean_std(df, decimals=3)
     df = format_colnames(df)
 
-    if output_path is not None:
-        output_path = Path(output_path).expanduser()
-        save_latex_table(df, out_dir=output_path, fname=name)
+    if outdir is not None:
+        outdir = Path(outdir).expanduser() / "meta-vs"
+        outdir.mkdir(parents=True, exist_ok=True)
+        save_latex_table(df, outdir=outdir, fname=name)
 
     return df, name
 
@@ -363,32 +321,18 @@ def meta_vs(data_path, gen_path, method, output_path):
 
 
 @main.command()
-@click.option(
-    "--input-path",
-    type=click.Path(exists=True),
-    help="Path to the evaluation file (JSONL format).",
-)
-@click.option(
-    "--output-path",
-    type=click.Path(exists=True),
-    default="./outputs/latex/",
-    help="Path to save the generated LaTeX tables.",
-)
-@click.option(
-    "--meta-path",
-    type=click.Path(exists=True),
-    required=False,
-    help="Path to the original dataset to extract metadata with.",
-)
-def dino_eval(input_path, output_path, meta_path):
+@click.option("--eval", "-e",   help="Path to the evaluation file (JSONL format).", metavar="JSONL", type=click.Path(exists=True))  # fmt: skip
+@click.option("--outdir", "-o", help="Path to save the generated LaTeX tables.", metavar="DIR",      type=click.Path(exists=True), default="out-latexify")  # fmt: skip
+def dino_eval(eval, outdir):
     """
     Read the evaluation file and return a DataFrame.
     """
 
-    input_path = Path(input_path).expanduser()
+    eval_path = Path(eval).expanduser()
+    name = extract_dataset_name(eval_path, suffix=".jsonl")
 
     # Read evaluation
-    with open(input_path, "r") as f:
+    with open(eval_path, "r") as f:
         data = json.load(f)
 
     accuracy = data.pop("accuracy", None)
@@ -404,40 +348,14 @@ def dino_eval(input_path, output_path, meta_path):
     df = pd.DataFrame.from_dict(data)
     df.index.name = "class"
 
-    # Meta and fname
-    name = None
-
-    if meta_path is not None:
-        # Get path to the data associated to the metrics input file
-        for fname in ["generated_images.zip", "dataset.zip"]:
-            if (input_path.parent / fname).exists():
-                path = input_path.parent / fname
-                break
-        meta_path = Path(meta_path).expanduser()
-        logger.info(f"Meta path: \n\t{path}\n{meta_path}\t")
-
-        meta_df, name = metadata_versus_df(meta_path, path, method="lp")
-
-        meta_df = format_mean_std(meta_df, decimals=3)
-        meta_df = format_colnames(meta_df)
-
-        if output_path is not None:
-            output_path = Path(output_path).expanduser()
-            save_latex_table(meta_df, out_dir=output_path, fname=name)
-
-    name = extract_dataset_name(input_path) if name is None else name
-    name = name.replace("meta", "dino") if "meta" in name else f"dino_{name}"
-
-    if "Labelset" in meta_df.columns:
-        df["Labelset"] = meta_df["Labelset"]
-
     # Format DataFrame and write LaTeX table
     df = format_mean_std(df, decimals=3)
     df = format_colnames(df)
 
-    if output_path is not None:
-        output_path = Path(output_path).expanduser()
-        save_latex_table(df, out_dir=output_path, fname=name)
+    if outdir is not None:
+        outdir = Path(outdir).expanduser() / "dino-eval"
+        outdir.mkdir(parents=True, exist_ok=True)
+        save_latex_table(df, outdir=outdir, fname=f"dino-{name}")
 
     return df, name
 
@@ -448,43 +366,31 @@ def dino_eval(input_path, output_path, meta_path):
 
 
 @main.command()
-@click.option(
-    "--input-path",
-    type=click.Path(exists=True),
-    help="Path to the evaluation file (JSONL format).",
-)
-@click.option(
-    "--output-path",
-    type=click.Path(exists=True),
-    default="./outputs/latex/",
-    help="Path to save the generated LaTeX tables.",
-)
-def evaluation(input_path, output_path):
+@click.option("--eval", "-e",   help="Path to the evaluation file (JSONL format).", metavar="JSONL", type=click.Path(exists=True))  # fmt: skip
+@click.option("--outdir", "-o", help="Path to save the generated LaTeX tables.", metavar="DIR",      type=click.Path(exists=True), default="out-latexify")  # fmt: skip
+def gen_eval(eval, outdir):
     """
     Reads the evaluation file and returns a DataFrame.
     """
 
-    input_path = Path(input_path).expanduser()
+    eval_path = Path(eval).expanduser()
 
-    model_name = input_path.parent.name
-    name = f"eval-{model_name}"
-    name = name.replace("-", "_")
-    print(f"Model name: {model_name}")
+    name = extract_dataset_name(eval_path, depth=2, suffix=".jsonl")
 
-    with open(input_path, "r") as f:
+    with open(eval_path, "r") as f:
         data = json.load(f)
 
     df = pd.DataFrame.from_dict(data, orient="index")
     df.index.name = "class"
 
-    # Format.
+    # Format DataFrame and write LaTeX table
     df = format_mean_std(df, decimals=3)
     df = format_colnames(df)
 
-    # Write into latex file.
-    if output_path is not None:
-        output_path = Path(output_path).expanduser()
-        save_latex_table(df, out_dir=output_path, fname=name)
+    if outdir is not None:
+        outdir = Path(outdir).expanduser() / "gen-eval"
+        outdir.mkdir(parents=True, exist_ok=True)
+        save_latex_table(df, outdir=outdir, fname=f"eval-{name}")
 
     return df, name
 
@@ -495,48 +401,28 @@ def evaluation(input_path, output_path):
 
 
 @main.command()
-@click.option(
-    "--gen-eval-path",
-    type=click.Path(exists=True),
-    help="Path to the evaluation file (JSONL format).",
-)
-@click.option(
-    "--clf-eval-path",
-    type=click.Path(exists=True),
-    help="Path to the evaluation file (JSONL format).",
-)
-@click.option(
-    "--meta-path",
-    type=click.Path(exists=True),
-    required=False,
-    help="Path to the original dataset to extract metadata with.",
-)
-@click.option(
-    "--output-path",
-    type=click.Path(exists=True),
-    default="./outputs/latex/",
-    help="Path to save the generated LaTeX tables.",
-)
-def comparison(gen_eval_path, clf_eval_path, meta_path, output_path):
+@click.option("--gen", "-g",    help="Path to the evaluation file (JSONL format) of generation.", metavar="JSONL",     type=click.Path(exists=True))  # fmt: skip
+@click.option("--clf", "-c",    help="Path to the evaluation file (JSONL format) of classification.", metavar="JSONL", type=click.Path(exists=True))  # fmt: skip
+@click.option("--outdir", "-o", help="Path to save the generated LaTeX tables.", metavar="DIR",                        type=click.Path(exists=True), default="out-latexify")  # fmt: skip
+def comparison(gen, clf, outdir):
     """
     Reads the evaluation file and returns a DataFrame.
     """
 
-    gen_df, name = evaluation.callback(gen_eval_path, None)
-    clf_df, name = dino_eval.callback(clf_eval_path, None, meta_path)
+    gen_df, gen_name = gen_eval.callback(gen, None)
+    clf_df, clf_name = dino_eval.callback(clf, None)
+
+    assert gen_name == clf_name, "Dataset names do not match"
+    name = gen_name
 
     # Filter gen_df
-    GEN_COLUMNS = [
-        "Num Features",
-        "P Inc",
-        "P Dino",
-    ]
-    gen_df = gen_df[[col for col in GEN_COLUMNS if col in gen_df.columns]]
+    gen_cols = ["Num Features", "FID", "P Inc", "P Dino"]
+    gen_df = gen_df[[col for col in gen_cols if col in gen_df.columns]]
     gen_df.index = gen_df.index.astype(str)
 
     # Filter clf_df
-    CLF_COLUMNS = ["Recall", "Labelset"]
-    clf_df = clf_df[[col for col in CLF_COLUMNS if col in clf_df.columns]]
+    clf_cols = ["Recall", "Labelset"]
+    clf_df = clf_df[[col for col in clf_cols if col in clf_df.columns]]
     clf_df.index = clf_df.index.astype(str)
 
     # Merge the two dataframes on the index (class)
@@ -553,14 +439,11 @@ def comparison(gen_eval_path, clf_eval_path, meta_path, output_path):
         ]
     )
 
-    # Build fname
-    name = extract_dataset_name(clf_eval_path) if name is None else name
-    name = name.replace("dino", "comp") if "dino" in name else f"comp_{name}"
-
     # Write into latex file.
-    if output_path is not None:
-        output_path = Path(output_path).expanduser()
-        save_latex_table(df, out_dir=output_path, fname=name)
+    if outdir is not None:
+        outdir = Path(outdir).expanduser() / "comparison"
+        outdir.mkdir(parents=True, exist_ok=True)
+        save_latex_table(df, outdir=outdir, fname=f"comp-{name}")
 
     return df, name
 
