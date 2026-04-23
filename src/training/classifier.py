@@ -5,7 +5,9 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-from transformers import AutoImageProcessor, AutoModel, AutoModelForImageClassification
+from transformers import AutoImageProcessor, AutoModelForImageClassification
+
+from datatools.utils import extract_dataset_name
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,11 +21,14 @@ FINETUNED_DINO_FNAME = "dino_finetuned.pth"
 NUM_CLASSES = {
     "ffhq-64x64": 2,
     "afhqv2-64x64": 3,
-    "LP-50eb47c0": 16,
+    "celeba-br-50eb47c0-64x64": 4,
+    "celeba-lp-50eb47c0-64x64": 16,
 }
 MODEL_PATHS = {
     "ffhq-64x64": "checkpoints/finetuned_dino_ffhq-64x64.pth",
     "afhqv2-64x64": "checkpoints/finetuned_dino_afhqv2-64x64.pth",
+    "celeba-br-50eb47c0-64x64": "out-train-dino/celeba-br-50eb47c0-64x64/dino_finetuned.pth",
+    "celeba-lp-50eb47c0-64x64": "out-train-dino/celeba-lp-50eb47c0-64x64/dino_finetuned.pth",
 }
 
 # FIX: build a common structure
@@ -88,7 +93,9 @@ class FeatureExtractor(nn.Module):
     def __init__(self, url):
         super(FeatureExtractor, self).__init__()
 
-        if "ffhq" in url:
+        if extract_dataset_name(url) in MODEL_PATHS.keys():
+            dataset_name = extract_dataset_name(url)
+        elif "ffhq" in url:
             dataset_name = "ffhq-64x64"
         elif "afhq" in url:
             dataset_name = "afhqv2-64x64"
